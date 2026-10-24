@@ -79,15 +79,15 @@ The biggest risk is that the LLM rater carries its own lean. v1 said "check manu
 
 Caveat for the pitch: AllSides rates outlets, not individual videos, so some disagreement is expected and worth explaining case by case.
 
-## Next feature (decision pending)
+## Next feature: Feed diet
 
-Pick one, based on which sponsor prize tracks we target:
+Decided: we are targeting the Mana track, so all new work happens inside Mana (judges get a bonus for a project that lives in Mana as an app they can open and use).
 
-- **Browser extension** (original vision): rating appears on YouTube while scrolling. Blocked on whether a Mana app can be called from outside Mana; today the AI calls go through `useManaRouter` inside the page. Ask the Mana team.
-- **Claim checking** (Tavily or Bright Data): a separate "claims checked" section with sources. Keep it separate from the lean score, since Slant rates presentation, not truth.
-- **Outlet context:** show the channel's AllSides rating next to Slant's video rating. Cheap, and doubles as live validation.
+**Feed diet** shows what a set of videos adds up to. Paste 10–30 links (or, stretch goal, a Google Takeout watch-history export) and see the totals: lean distribution, average sensationalism and one-sidedness, most-watched channels, and the most slanted videos. It answers "what has my feed been showing me?" and is more trustworthy than any single score, because errors average out.
 
-Later: video description and channel ownership as inputs, non-political content, long-form tuning.
+Polish before demo: vertical player for Shorts, clearer "overall" label, AllSides label next to the score, hide unmatched quotes, reuse existing analyses instead of re-running, a "Disagree?" button, and a "How Slant works" page.
+
+Later (vision slide): browser extension, claim checking with sources, TikTok/Reels, video description and channel ownership as inputs.
 
 ## Risks and mitigation
 
@@ -98,7 +98,7 @@ Later: video description and channel ownership as inputs, non-political content,
 | YouTube blocks caption requests from cloud IPs | Gemini audio fallback; pre-analyze demo videos (saved results load instantly) |
 | Analysis takes 20–60 s | Step-by-step progress UI already built; keep a finished analysis open as demo backup |
 | Mana credits run out | Watch usage; pre-analyze demo set |
-| Code locked into Mana | Source export in repo; extension/claim-check work done in this repo where possible |
+| Judges can't use the app | Make the Mana app and build chats public; test from a teammate's account; keep pre-analyzed examples visible |
 
 ## Changes from v1
 
