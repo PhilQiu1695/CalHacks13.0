@@ -17,3 +17,9 @@ __pycache__/
 # Node
 node_modules/
 dist/
+
+# Slant extension: backend secrets and database, build zips, test screenshots
+slant-extension/backend/data/
+slant-extension/dist/
+slant-extension/tests/browser/shots/
+*.sqlite3*

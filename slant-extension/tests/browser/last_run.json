@@ -1,0 +1,73 @@
+{
+ "chromium": "chromium-1208",
+ "passed": 13,
+ "total": 13,
+ "results": [
+  {
+   "scenario": "S1 pair via pasted link; the pending toolbar click is analyzed (cached)",
+   "pass": true,
+   "detail": "saved-click note=True, cached=True, key in local storage=True, sync items=0"
+  },
+  {
+   "scenario": "S2 summary: lean, slant score, five signals (tap to expand), summary, full-report link, disclosures",
+   "pass": true,
+   "detail": "{\"lean\": true, \"overall\": true, \"five signals\": true, \"headline+summary\": true, \"full report link\": true, \"signal expands on tap\": true, \"source disclosure\": true, \"Open in Slant under the status line\": true, \"not in footer\": true, \"saved label\": true}"
+  },
+  {
+   "scenario": "S3 'Open full report' and 'Open in Slant' open this analysis on the Slant website in a new tab",
+   "pass": true,
+   "detail": "full report=TM7Y5ez2/apps/slant?slant=v1792884191508; Open in Slant opened slant=v1792884191508: True"
+  },
+  {
+   "scenario": "S4 SPA navigation keeps the old result labelled; its timestamps open a new tab; a click analyzes the new video",
+   "pass": true,
+   "detail": "label kept=True, banner='This tab now shows a different video. The analysis below is ', other-video tab untouched=True, timestamps now live on the full report"
+  },
+  {
+   "scenario": "S4b 'Analyze the current video' (in the panel) reads the tab's URL at click time",
+   "pass": true,
+   "detail": "fKzS5sYtZ0A"
+  },
+  {
+   "scenario": "S5 Short analyzed with the Short layout; a repeat click submits nothing",
+   "pass": true,
+   "detail": "Short layout=True, same job and no new backend job=True"
+  },
+  {
+   "scenario": "S6 non-video pages show 'Open a YouTube video to analyze it.'",
+   "pass": true,
+   "detail": "example.com, youtube.com home: [True, True]"
+  },
+  {
+   "scenario": "S7 out-of-credits and rate-limit errors render; retry offered only when it helps",
+   "pass": true,
+   "detail": "{\"fail-credits\": {\"code\": \"insufficient_credits\", \"retry\": false}, \"fail-rate\": {\"code\": \"rate_limited\", \"retry\": true}}; no Open in Slant after errors=True"
+  },
+  {
+   "scenario": "S8 panel closed + service worker stopped mid-job: reopening resumes the same job",
+   "pass": true,
+   "detail": "worker stopped=True, same job=True, backend jobs for this video=1, Open in Slant hidden while running=True and on the simulated result=True"
+  },
+  {
+   "scenario": "S11 Analyze again still works (simulated, free); Open in Slant hides while it runs and returns on the saved result",
+   "pass": true,
+   "detail": "shown on saved=True, confirm=True, simulated fresh run done=True, hidden while running=True, hidden on simulated=True, back on saved result=True"
+  },
+  {
+   "scenario": "S12 at 320 px wide the header doesn't overflow and Open in Slant fits",
+   "pass": true,
+   "detail": "{\"docW\": 305, \"vw\": 320, \"hdRight\": 287, \"hdScroll\": 0, \"btnRight\": 215.859375, \"btnH\": 28}"
+  },
+  {
+   "scenario": "S9 revoked key shows 'This browser was disconnected' and asks to pair again",
+   "pass": true,
+   "detail": ""
+  },
+  {
+   "scenario": "S10 expired link detected (by the panel and by the gateway); a reconnect link restores it with the same key",
+   "pass": true,
+   "detail": "key kept across reconnect=True"
+  }
+ ],
+ "ranAt": "2026-10-24 16:27:26 PDT"
+}
