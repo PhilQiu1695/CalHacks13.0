@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bias Lens transcript service. GET /healthz, GET /transcript?url=<youtube url>.
+"""Slant caption service. GET /healthz, GET /transcript?url=<youtube url>.
 Returns {videoId,title,author,thumbnail,language,languageCode,isGenerated,snippets:[{t,d,text}]}"""
 import json, re, sys, urllib.parse, urllib.request
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
@@ -59,7 +59,7 @@ class H(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Headers", "*"); self.end_headers()
     def do_GET(self):
         u = urllib.parse.urlparse(self.path)
-        if u.path in ("/healthz", "/"): return self._send(200, {"ok": True})
+        if u.path in ("/healthz", "/"): return self._send(200, {"ok": True, "service": "Slant caption service"})
         if u.path != "/transcript": return self._send(404, {"error": "not found"})
         q = urllib.parse.parse_qs(u.query)
         vid = video_id((q.get("url") or [""])[0])

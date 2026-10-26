@@ -1,0 +1,442 @@
+#!/usr/bin/env python3
+"""Slant for Chrome: extension backend. Binds 127.0.0.1:<data/port>; exposed publicly only through Mana ingress (service slant-ext).
+
+Auth model
+- Browsers: X-Slant-Key: slk_... (from a single-use pairing code). Required for /v1/session and /v1/jobs*. A job is visible
+  only to the browser that created it.
+- Owner: X-Sender-Uid set by Mana ingress forward-auth from a verified Firebase ID token (Mana console), or X-Slant-Admin with
+  the token in data/admin.token (sandbox CLI). Neither the ingress URL, a CORS origin nor any caller-supplied user id is identity.
+- Any signed-in Mana account (/v1/me/*): X-Slant-Id-Token, a Firebase ID token verified here (Google's RS256 keys, audience,
+  issuer, expiry). Guest (anonymous) sessions are refused. If forward-auth also sent X-Sender-Uid it must name the same
+  account. An account can create pairing codes for itself and list or revoke only its own browsers; administration stays on
+  /v1/owner/*. Every analysis still runs on the owner's Mana credits, under per-account, per-browser and global limits.
+"""
+import collections
+import hmac
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlsplit
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+if '/opt/sandbox_libs' not in sys.path:
+    sys.path.append('/opt/sandbox_libs')
+from slant_ext import config  # noqa: E402
+from slant_ext.jobs import ApiError, JobManager  # noqa: E402
+from slant_ext.identity import TokenError, VerifierUnavailable  # noqa: E402
+
+OWNER_ORIGINS = {"https://www.mana.space", "https://mana.space"}
+EXTRACT = os.path.join(config.ROOT, "spec", "extract_spec.js")
+
+
+def now_ms():
+    return int(time.time() * 1000)
+
+
+class RateLimiter:
+    def __init__(self):
+        self.hits, self.lock = collections.defaultdict(collections.deque), threading.Lock()
+
+    def allow(self, key, limit, window_s):
+        now = time.monotonic()
+        with self.lock:
+            dq = self.hits[key]
+            while dq and dq[0] <= now - window_s:
+                dq.popleft()
+            if len(dq) >= limit:
+                return False
+            dq.append(now)
+            return True
+
+
+class App:
+    def __init__(self, store, auth, records, jobs, providers, spec, limits, owner_uid, admin_token, trust_sender_uid=True, verifier=None):
+        self.store, self.auth, self.records, self.jobs, self.providers = store, auth, records, jobs, providers
+        self.spec, self.limits, self.owner_uid, self.admin_token = spec, limits, owner_uid, admin_token
+        self.trust_sender_uid, self.verifier = trust_sender_uid, verifier
+        self._team, self._team_lock = {}, threading.Lock()
+        jobs.account_exempt = self.is_team
+        self.rl = RateLimiter()
+        self.started = now_ms()
+        self._drift, self._drift_at, self._live_spec = None, 0, None
+
+    def is_editor(self, sender):
+        # Read current named write grants on the console and its ancestors. No
+        # browser-supplied identity, cached allowlist, or read-only grant qualifies.
+        if not isinstance(sender, str) or not sender or any(c in sender for c in ".#$[]/"):
+            return False
+        root = f"{self.owner_uid}/file-system"
+        try:
+            return any(self.records.fb.read(f"{path}/metadata/permissions/write/{sender}") is True
+                       for path in (root, root + "/apps", root + "/apps/slant-extension"))
+        except Exception:
+            return False  # Fail closed if the permission store is unavailable.
+
+    def is_team(self, uid):
+        """Owner or Editor: exempt from per-account caps. Cached for 60 s (limits only; admin routes read grants live)."""
+        if uid == self.owner_uid:
+            return True
+        now = time.time()
+        with self._team_lock:
+            hit = self._team.get(uid)
+            if hit and now - hit[1] < 60:
+                return hit[0]
+        val = self.is_editor(uid)
+        with self._team_lock:
+            self._team[uid] = (val, now)
+        return val
+
+    def set_spec(self, spec):
+        self.spec = self.jobs.spec = self.providers.spec = spec
+
+    def spec_check(self, force=False):
+        if not force and self._drift and time.time() - self._drift_at < 300:
+            return self._drift
+        try:
+            code = self.records.fb.read(f"{self.records.app}/code")
+            with tempfile.TemporaryDirectory() as d:
+                cp, op = os.path.join(d, "app.jsx"), os.path.join(d, "spec.json")
+                with open(cp, "w") as f:
+                    f.write(code or "")
+                r = subprocess.run(["node", EXTRACT, "--code", cp, "--out-spec", op, "--no-golden"], capture_output=True, text=True, timeout=40)
+                if r.returncode:
+                    raise RuntimeError((r.stderr or r.stdout)[-200:])
+                live = config.load_spec(op)
+            self._live_spec = live
+            self._drift = {"inUse": self.spec["HASH"], "live": live["HASH"], "matches": live["HASH"] == self.spec["HASH"], "checkedAt": now_ms()}
+        except Exception as e:
+            self._drift = {"inUse": self.spec["HASH"], "error": str(e)[:200], "checkedAt": now_ms()}
+        self._drift_at = time.time()
+        return self._drift
+
+    def sync_spec(self):
+        d = self.spec_check(force=True)
+        if self._live_spec and not d.get("matches"):
+            out = {k: v for k, v in self._live_spec.items() if k != "HASH"}
+            tmp = config.SPEC_PATH + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(out, f, indent=1)
+            shutil.move(tmp, config.SPEC_PATH)
+            self.set_spec(self._live_spec)
+            d = self.spec_check(force=True)
+        return d
+
+
+def make_handler(app):
+    L = app.limits
+
+    class Handler(BaseHTTPRequestHandler):
+        server_version = "slant-ext"
+        sys_version = ""
+
+        def log_message(self, fmt, *args):
+            sys.stdout.write("%s %s\n" % (time.strftime("%H:%M:%S"), fmt % args))
+
+        # ---- plumbing -----------------------------------------------------------------------------------------
+        def _cors(self):
+            origin = self.headers.get("Origin")
+            if origin in OWNER_ORIGINS:
+                self.send_header("Access-Control-Allow-Origin", origin)
+                self.send_header("Vary", "Origin")
+                self.send_header("Access-Control-Allow-Headers", "authorization, content-type, x-slant-id-token")
+                self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+
+        def _send(self, status, obj):
+            body = json.dumps(obj, ensure_ascii=False).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self._cors()
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _err(self, status, code, message):
+            self._send(status, {"error": {"code": code, "message": message}})
+
+        def _body(self):
+            n = int(self.headers.get("Content-Length") or 0)
+            if n > L["body_max_bytes"]:
+                raise ApiError(413, "too_large", "Request body too large.")
+            raw = self.rfile.read(n) if n else b""
+            try:
+                obj = json.loads(raw or b"{}")
+            except ValueError:
+                raise ApiError(400, "bad_json", "Request body must be JSON.")
+            if not isinstance(obj, dict):
+                raise ApiError(400, "bad_json", "Request body must be a JSON object.")
+            return obj
+
+        def _ip(self):
+            xff = self.headers.get("X-Forwarded-For")
+            return (xff.split(",")[0].strip() if xff else self.client_address[0])[:64]
+
+        def _cred(self):
+            cred = app.auth.check(self.headers.get("X-Slant-Key"))
+            if not cred:
+                raise ApiError(401, "unauthorized", "This browser isn't connected to Slant, or its connection was removed. Pair it again.")
+            return cred
+
+        def _owner(self):
+            adm = self.headers.get("X-Slant-Admin")
+            if adm and hmac.compare_digest(adm, app.admin_token):
+                return "admin"
+            sender = self.headers.get("X-Sender-Uid") if app.trust_sender_uid else None
+            if sender == app.owner_uid:
+                return "owner"
+            if sender and app.is_editor(sender):
+                return "editor"
+            raise ApiError(403, "forbidden", "Only the owner or an editor of Slant for Chrome can do that.")
+
+        def _user(self):
+            """Any signed-in Mana account. Returns (identity, is_team)."""
+            tok = self.headers.get("X-Slant-Id-Token")
+            if not tok:
+                raise ApiError(401, "sign_in_required", "Sign in to Mana to pair a browser.")
+            if not app.verifier:
+                raise ApiError(503, "unavailable", "Sign-in checks aren't available right now.")
+            try:
+                ident = app.verifier.verify(tok)
+            except TokenError:
+                raise ApiError(401, "sign_in_required", "Your Mana sign-in couldn't be verified. Reload the page and try again.")
+            except VerifierUnavailable:
+                raise ApiError(503, "unavailable", "Couldn't check your Mana sign-in just now. Try again in a minute.")
+            sender = self.headers.get("X-Sender-Uid") if app.trust_sender_uid else None
+            if sender and sender != ident.uid:
+                raise ApiError(403, "forbidden", "Your sign-in doesn't match this request. Reload the page and try again.")
+            if ident.anonymous:
+                raise ApiError(403, "sign_in_required", "Sign in to Mana with your account to pair a browser. Guest sessions can't pair.")
+            if not app.rl.allow("me:" + ident.uid, 120, 60):
+                raise ApiError(429, "rate_limited", "Too many requests. Wait a minute.")
+            return ident, app.is_team(ident.uid)
+
+        def _me(self, method, path):
+            ident, team = self._user()
+            uid, day = ident.uid, now_ms() - 86_400_000
+            if method == "GET" and path == "/v1/me/status":
+                creds = app.auth.list_for(uid)
+                for c in creds:
+                    c["newAnalysesLast24h"] = app.store.paid_since(day, c["id"])
+                jobs = app.store.recent_jobs_for_uid(uid, 8)
+                return self._send(200, {
+                    "role": "team" if team else "user", "email": ident.email, "version": config.VERSION,
+                    "credentials": creds,
+                    "usage": {"newAnalysesLast24h": app.store.paid_since_uid(day, uid), "accountDaily": None if team else L["account_daily"],
+                              "globalUsed": app.store.paid_since(day, public_only=True), "globalDaily": L["global_daily"]},
+                    "limits": {"per_browser_daily": L["per_browser_daily"], "max_browsers": None if team else L["account_max_browsers"],
+                               "pairing_code_ttl_seconds": L["pairing_code_ttl_seconds"], "max_minutes_ai": L["max_minutes_ai"],
+                               "max_minutes_captions": L["max_minutes_captions"]},
+                    "jobs": [{k: j.get(k) for k in ("id", "video_id", "state", "title", "error_code", "cached", "created_at")}
+                             | {"total_ms": (j.get("timings") or {}).get("total")} for j in jobs if not j.get("simulate")]})
+            if method == "POST" and path == "/v1/me/pairing-codes":
+                b = self._body()
+                if not team:
+                    if app.auth.live_count(uid) >= L["account_max_browsers"]:
+                        raise ApiError(409, "browser_limit", f"You already have {L['account_max_browsers']} browsers paired. Revoke one below to pair another.")
+                    if not app.rl.allow("code:" + uid, L["account_codes_per_hour"], 3600):
+                        raise ApiError(429, "rate_limited", "You've created a lot of pairing links. Wait a while and try again.")
+                if not app.rl.allow("code:*", 300, 3600) or app.auth.outstanding() >= L["max_outstanding_codes"]:
+                    raise ApiError(429, "rate_limited", "Too many people are pairing right now. Try again in a few minutes.")
+                label = b.get("label") if isinstance(b.get("label"), str) else None
+                code, exp = app.auth.create_code(label, False, L["pairing_code_ttl_seconds"],
+                                                 L["max_active_pairing_codes"] if team else L["account_active_codes"], uid=uid, email=ident.email)
+                return self._send(200, {"code": code, "expiresAt": exp, "ttlSeconds": L["pairing_code_ttl_seconds"]})
+            # ---- the Slant website: team-only analyses (the page never holds AI access) ----
+            if method == "POST" and path == "/v1/me/analyze":
+                if not team:
+                    raise ApiError(403, "view_only", "Only the Slant team can start new analyses on the website. Saved analyses are open to everyone.")
+                cred = app.auth.web_credential(uid, ident.email)
+                if not app.rl.allow("submit:" + cred["id"], L["submit_per_minute"], 60):
+                    raise ApiError(429, "rate_limited", "Too many requests. Wait a minute.")
+                b = self._body()
+                url, target = b.get("url"), b.get("recordId")
+                if not isinstance(url, str) or len(url) > 2048:
+                    raise ApiError(400, "unsupported_url", "That doesn't look like a YouTube link.")
+                if target is not None and (not isinstance(target, str) or not re.match(r"^v\d{1,20}$", target)):
+                    raise ApiError(400, "bad_request", "Unknown analysis.")
+                job, created = app.jobs.submit(cred, url, b.get("idempotencyKey"), b.get("mode") or "auto", None, target=target)
+                return self._send(202 if created and job["state"] != "done" else 200, {"job": app.jobs.view(job), "created": created})
+            if method == "GET" and path.startswith("/v1/me/jobs/") and path.count("/") == 4:
+                if not team:
+                    raise ApiError(403, "view_only", "Only the Slant team can start new analyses on the website.")
+                job = app.jobs.get_for(app.auth.web_credential(uid, ident.email), path.split("/")[-1])
+                return self._send(200, {"job": app.jobs.view(job)})
+            if method == "POST" and path.startswith("/v1/me/credentials/") and path.endswith("/revoke") and path.count("/") == 5:
+                cid = path.split("/")[4]
+                res = app.auth.revoke_for(cid, uid)
+                if res is None:
+                    raise ApiError(404, "not_found", "That browser isn't one of yours.")
+                return self._send(200, {"revoked": res, "credentialId": cid})
+            raise ApiError(404, "not_found", "Not found.")
+
+        def _route(self, method):
+            path = urlsplit(self.path).path.rstrip("/") or "/"
+            try:
+                return self._dispatch(method, path)
+            except ApiError as e:
+                return self._err(e.status, e.code, e.message)
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                return self._err(500, "internal", "Internal error: " + type(e).__name__)
+
+        def do_GET(self):
+            self._route("GET")
+
+        def do_POST(self):
+            self._route("POST")
+
+        def do_OPTIONS(self):
+            self.send_response(204)
+            self._cors()
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        # ---- routes -------------------------------------------------------------------------------------------
+        def _dispatch(self, method, path):
+            if method == "GET" and path in ("/", "/healthz"):
+                return self._send(200, {"ok": True, "service": config.SERVICE, "version": config.VERSION, "spec": app.spec["HASH"]})
+
+            if method == "POST" and path == "/v1/pair":
+                if not app.rl.allow("pair:" + self._ip(), L["pair_attempts_per_10min"], 600) or not app.rl.allow("pair:*", 60, 3600):
+                    raise ApiError(429, "rate_limited", "Too many pairing attempts. Wait a few minutes and try again.")
+                b = self._body()
+                label = b.get("label") if isinstance(b.get("label"), str) else None
+                owner = app.auth.code_owner(b.get("code"))          # team check (a Firebase read) happens outside the store lock
+                cap = None if (not owner or app.is_team(owner)) else L["account_max_browsers"]
+                res = app.auth.redeem(b.get("code"), "".join(ch for ch in (label or "") if ch.isprintable())[:40], max_browsers=cap)
+                if res == "browser_limit":
+                    raise ApiError(409, "browser_limit", f"This Mana account already has {cap} browsers paired. Revoke one in Slant for Chrome, then try this link again.")
+                if not res:
+                    raise ApiError(400, "invalid_code", "That pairing code is invalid, expired or already used. Create a new one in Slant for Chrome in Mana.")
+                return self._send(200, {"credential": res["credential"], "credentialId": res["credentialId"], "label": res["label"],
+                                        "test": res["test"], "version": config.VERSION})
+
+            if method == "GET" and path == "/v1/session":
+                cred = self._cred()
+                day = now_ms() - 86_400_000
+                return self._send(200, {"credentialId": cred["id"], "label": cred["label"], "test": bool(cred["test"]),
+                                        "pairedAt": cred["created_at"], "version": config.VERSION, "spec": app.spec["HASH"],
+                                        "appUrl": f"https://www.mana.space/home/{app.owner_uid}/apps/slant",
+                                        "usage": {"newAnalysesLast24h": app.store.paid_since(day, cred["id"]), "limit": L["per_browser_daily"]},
+                                        "limits": {k: L[k] for k in ("max_minutes_captions", "max_minutes_ai", "per_browser_daily")}})
+
+            if method == "POST" and path == "/v1/jobs":
+                cred = self._cred()
+                if not app.rl.allow("submit:" + cred["id"], L["submit_per_minute"], 60):
+                    raise ApiError(429, "rate_limited", "Too many requests from this browser. Wait a minute.")
+                b = self._body()
+                url = b.get("url")
+                if not isinstance(url, str) or len(url) > 2048:
+                    raise ApiError(400, "unsupported_url", "Open a YouTube video to analyze it.")
+                job, created = app.jobs.submit(cred, url, b.get("idempotencyKey"), b.get("mode") or "auto", b.get("simulate"))
+                return self._send(202 if created and job["state"] != "done" else 200, {"job": app.jobs.view(job), "created": created})
+
+            if method == "GET" and path.startswith("/v1/jobs/"):
+                cred = self._cred()
+                if not app.rl.allow("poll:" + cred["id"], L["poll_per_minute"], 60):
+                    raise ApiError(429, "rate_limited", "Polling too fast.")
+                job = app.jobs.get_for(cred, path.split("/")[-1])
+                return self._send(200, {"job": app.jobs.view(job)})
+
+            if path.startswith("/v1/me/"):
+                return self._me(method, path)
+
+            if path.startswith("/v1/owner/"):
+                who = self._owner()
+                if method == "GET" and path == "/v1/owner/status":
+                    day = now_ms() - 86_400_000
+                    creds = app.auth.list()
+                    me = self.headers.get("X-Sender-Uid") if app.trust_sender_uid else None
+                    for c in creds:
+                        c["newAnalysesLast24h"] = app.store.paid_since(day, c["id"])
+                        uid = c.pop("uid", None)          # don't expose other people's ids; say whose feed it fills
+                        c["feed"] = "none" if not uid else ("mine" if me and uid == me else ("owner" if uid == app.owner_uid else "other"))
+                        c["pairedBy"] = c.pop("email", None)   # verified address of the account that paired it (team view only)
+                        c["kind"] = "team" if (not uid or app.is_team(uid)) else "public"
+                    jobs = app.store.recent_jobs(15)
+                    return self._send(200, {
+                        "service": config.SERVICE, "version": config.VERSION, "startedAt": app.started, "who": who,
+                        "spec": app.spec_check(), "limits": L, "credentials": creds,
+                        "usage": {"newAnalysesLast24h": app.store.paid_since(day), "publicLast24h": app.store.paid_since(day, public_only=True),
+                                  "globalDaily": L["global_daily"],
+                                  "activePaid": app.store.active_paid()},
+                        "jobs": [{k: j.get(k) for k in ("id", "credential_id", "video_id", "mode", "state", "stage", "title", "author",
+                                                         "source", "error_code", "cached", "paid", "follows", "record_id", "simulate",
+                                                         "created_at", "finished_at")} | {"total_ms": (j.get("timings") or {}).get("total")}
+                                 for j in jobs]})
+                if method == "POST" and path == "/v1/owner/pairing-codes":
+                    b = self._body()
+                    test = bool(b.get("test")) and who == "admin"
+                    sender = self.headers.get("X-Sender-Uid") if (app.trust_sender_uid and who != "admin") else None
+                    code, exp = app.auth.create_code(b.get("label") if isinstance(b.get("label"), str) else None, test,
+                                                     L["pairing_code_ttl_seconds"], L["max_active_pairing_codes"], uid=sender)
+                    return self._send(200, {"code": code, "expiresAt": exp, "ttlSeconds": L["pairing_code_ttl_seconds"], "test": test})
+                if method == "POST" and path.startswith("/v1/owner/credentials/") and path.endswith("/revoke"):
+                    cid = path.split("/")[4]
+                    return self._send(200, {"revoked": app.auth.revoke(cid), "credentialId": cid})
+                if method == "POST" and path.startswith("/v1/owner/credentials/") and path.endswith("/claim"):
+                    # "This is my browser": link a browser paired before feed history existed to the signed-in person.
+                    if who == "admin":
+                        raise ApiError(400, "bad_request", "Sign in to Mana to link a browser to your feed.")
+                    cid = path.split("/")[4]
+                    return self._send(200, {"claimed": app.auth.claim(cid, self.headers.get("X-Sender-Uid")), "credentialId": cid})
+                if method == "POST" and path == "/v1/owner/spec/sync":
+                    return self._send(200, {"spec": app.sync_spec()})
+                if method == "GET" and path == "/v1/owner/health":
+                    out = {"spec": app.spec["HASH"]}
+                    try:
+                        out["firebase"] = {"ok": True, "analyses": len([k for k in app.records.analyses(force=True) or {} if k.startswith("v")])}
+                    except Exception as e:
+                        out["firebase"] = {"ok": False, "error": type(e).__name__}
+                    cap = app.providers.captions("lmjHE8CEhPM") if self.headers.get("X-Probe-Captions") else None
+                    out["captions"] = None if cap is None else {"ok": cap["ok"], "status": cap["status"], "offline": cap["offline"]}
+                    out["router"] = app.providers.probe()
+                    return self._send(200, out)
+            raise ApiError(404, "not_found", "Not found.")
+
+    return Handler
+
+
+def build_app(trust_sender_uid=True):
+    from firebase_helper import firebase
+    from slant_ext.auth import Auth
+    from slant_ext.providers import LiveProviders
+    from slant_ext.records import SlantRecords
+    from slant_ext.store import Store
+    os.makedirs(config.DATA_DIR, exist_ok=True)
+    spec, limits, owner = config.load_spec(), config.load_limits(), config.owner_uid()
+    store = Store(os.path.join(config.DATA_DIR, "slant_ext.sqlite3"))
+    auth = Auth(store, config.secret_file("pepper"))
+    records = SlantRecords(firebase, f"{owner}/file-system/apps/slant/app", owner)
+    with open("/workspace/yt-bias/port") as f:
+        providers = LiveProviders(spec, int(f.read().strip()))
+    jobs = JobManager(store, records, providers, spec, limits)
+    from slant_ext.feed import FeedWriter
+    jobs.feed = FeedWriter(firebase, owner)
+    from slant_ext.identity import FirebaseVerifier
+    return App(store, auth, records, jobs, providers, spec, limits, owner, config.secret_file("admin.token"), trust_sender_uid,
+               verifier=FirebaseVerifier(config.FIREBASE_PROJECT))
+
+
+def main():
+    app = build_app(trust_sender_uid=os.environ.get("SLANT_EXT_TRUST_SENDER_UID", "1") == "1")
+    app.jobs.start()
+    with open(os.path.join(config.DATA_DIR, "port")) as f:
+        port = int(f.read().strip())
+    srv = ThreadingHTTPServer(("127.0.0.1", port), make_handler(app))
+    srv.daemon_threads = True
+    print(f"slant-ext {config.VERSION} listening on 127.0.0.1:{port} spec={app.spec['HASH']} owner={app.owner_uid[:6]}…", flush=True)
+    srv.serve_forever()
+
+
+if __name__ == "__main__":
+    main()

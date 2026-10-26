@@ -1,0 +1,52 @@
+[
+ {
+  "scenario": "C1 unpaired: the bear says 'Set up Slant'; a tap opens the setup page; pairing analyzes the waiting video (saved, free)",
+  "pass": true,
+  "detail": "tip before='Set up Slant\\nTap to connect this browser', after tap='Finish setup\\nin the Slant tab that just opened', setup says='You\u2019re set. Your video is being analyzed.', bear='Tap me for results', cached=True"
+ },
+ {
+  "scenario": "C2 card: one centre line (bear, bubble, card), lean on the AllSides scale in words, five signals out of 10, equal Close / Full report buttons, no scrollbar, readable fonts",
+  "pass": true,
+  "detail": "centres card/tip/bear 1179.0/1179.0/1179.0; buttons [('Close', 162), ('Full report \u2197', 162)]; inside=True; words=True; signals=5; link=ok; overflow=0; bubble/scrollbar/fonts ok=True (scrollbar 0px, fonts [22, 18]); in view=True"
+ },
+ {
+  "scenario": "C3 interactions: Escape, Close and a second bear tap all hide the card; the card body scrolls with the wheel",
+  "pass": true,
+  "detail": "wheel scroll=True, escape=True, close=True, tap again=True"
+ },
+ {
+  "scenario": "C4 toolbar shortcut Alt+Shift+S acts like a tap on the bear (opens and hides the card)",
+  "pass": true,
+  "detail": ""
+ },
+ {
+  "scenario": "C5 analyzing (simulated, free): the bubble shows live steps and seconds in readable type; a simulated result hides the report link",
+  "pass": true,
+  "detail": "steps seen=['Analyzing slant', 'Checking the video', 'Reading captions', 'Saving to your Slant history'], seconds seen=6, step font=18px, simulated=True, report link hidden=True, single full-width Close=True, note='Simulated test result \u00b7 not saved'"
+ },
+ {
+  "scenario": "C6 errors: out of credits shows the reason with Close only; a rate limit offers Try again, which recovers (saved, free)",
+  "pass": true,
+  "detail": "{\"fail-credits\": {\"title\": \"Out of Mana credits\", \"retry\": false, \"close\": true}, \"fail-rate\": {\"title\": \"Slant is busy\", \"retry\": true, \"close\": true}}; after Try again: 'Tap me for results', cached=True"
+ },
+ {
+  "scenario": "C7 Short: the bear and card work on /shorts/ with the same layout",
+  "pass": true,
+  "detail": "short=T188i_SVLVI, label='Tap me for results'"
+ },
+ {
+  "scenario": "C8 the service worker is stopped mid-job: the bear's nudge resumes the same job (no second submission)",
+  "pass": true,
+  "detail": "workers stopped=1, label='Tap me for results', simulated jobs submitted=1"
+ },
+ {
+  "scenario": "C9 expired link: 'Reconnect Slant' opens the setup page in reconnect mode; pasting a reconnect link analyzes the waiting video (saved, free)",
+  "pass": true,
+  "detail": "before='Reconnect Slant\\nTap to connect this browser', setup tab brought forward=visible, after='Tap me for results'"
+ },
+ {
+  "scenario": "C10 short window (1100\u00d7620): the card stays on screen, its body scrolls and the Close / Full report buttons stay visible",
+  "pass": true,
+  "detail": "card bottom=604, right=1069, scrolls=True, overflow=0"
+ }
+]
