@@ -32,7 +32,7 @@ def fresh_env(tree=None, limits=None, clock=None):
     d = tempfile.mkdtemp()
     store = Store(os.path.join(d, "t.sqlite3"))
     fb = FakeFirebase(tree or {})
-    records = SlantRecords(fb, APP, SPEC["FLAG_PERMS"], "OWNER_UID", ttl_ms=0)
+    records = SlantRecords(fb, APP, "OWNER_UID", ttl_ms=0)
     prov = FakeProviders(SPEC)
     lim = dict(LIMITS, **(limits or {}))
     jobs = JobManager(store, records, prov, SPEC, lim, sim_delay=0.01, **({"clock": clock} if clock else {}))
@@ -46,14 +46,14 @@ def cred_of(auth, test=False, label="Test Chrome"):
     return auth.check(res["credential"]), res["credential"]
 
 
-def saved_tree(vid="lmjHE8CEhPM", packed=False, flags=None):
+def saved_tree(vid="lmjHE8CEhPM", packed=False, extra=None):
     res = report()
     if packed:
         for d in res["dimensions"]:
             d["quotesJson"] = json.dumps(d.pop("quotes"))
     rec = {"videoId": vid, "url": "https://www.youtube.com/watch?v=" + vid, "title": "Saved", "author": "Reuters", "language": "",
            "source": "auto-captions", "model": "gpt-6-astra", "segments": 3, "duration": 7, "truncated": False, "result": res,
-           "flags": {"metadata": {"permissions": SPEC["FLAG_PERMS"]}, **(flags or {})},
+           **(extra or {}),
            "metadata": {"type": "entry", "createdAt": 1000, "updatedAt": 1000}}
     return {"OWNER_UID": {"file-system": {"apps": {"slant": {"app": {
         "analyses": {"v1000": rec}, "transcripts": {"v1000": {"snippets": SNIPS, "metadata": {"type": "entry"}}}}}}}}}
@@ -220,11 +220,11 @@ class JobTests(unittest.TestCase):
         app = self.fb.read(APP)
         rid = j["record_id"]
         rec = app["analyses"][rid]
-        for k in ("videoId", "url", "title", "author", "language", "source", "model", "segments", "duration", "truncated", "result", "flags", "metadata"):
+        for k in ("videoId", "url", "title", "author", "language", "source", "model", "segments", "duration", "truncated", "result", "metadata"):
             self.assertIn(k, rec)
         self.assertEqual(rec["url"], "https://www.youtube.com/shorts/oAG7ekh3878", "Shorts keep /shorts/ so the app shows the 9:16 player")
         self.assertEqual(rec["source"], "auto-captions")
-        self.assertEqual(rec["flags"]["metadata"]["permissions"], SPEC["FLAG_PERMS"])
+        self.assertNotIn("flags", rec, "Disagree? was removed: no open-write notes node on new records")
         self.assertEqual(rec["metadata"]["type"], "entry")
         self.assertEqual((rec["via"], rec["analysisVersion"]), ("chrome-extension", SPEC["HASH"]))
         self.assertEqual(app["transcripts"][rid]["snippets"][2]["text"], "Riyadh Airport is closed")
@@ -324,14 +324,14 @@ class JobTests(unittest.TestCase):
         self.assertTrue(vb["coalesced"] and vb["result"]["recordId"] == self.store.job(a["id"])["record_id"])
         self.assertEqual(self.store.paid_since(0), 1)
 
-    def test_fresh_reanalysis_preserves_feedback(self):
-        flags = {"someUid": {"part": "political", "note": "I disagree", "at": 5}}
-        self.env(tree=saved_tree(flags=flags))
+    def test_fresh_reanalysis_preserves_other_fields(self):
+        self.env(tree=saved_tree(extra={"via": "app"}))
         self.prov.analyze_result = report(score=5)
         j = self.done(self.jobs.submit(self.cred, "https://youtu.be/lmjHE8CEhPM", "fresh-1-abc", mode="fresh")[0]["id"])
         self.assertEqual((j["state"], j["record_id"]), ("done", "v1000"))
         rec = self.fb.read(APP + "/analyses/v1000")
-        self.assertEqual(rec["flags"]["someUid"]["note"], "I disagree")
+        self.assertEqual(rec["via"], "app")
+        self.assertNotIn("flags", rec)
         self.assertEqual(rec["result"]["political"]["score"], 5)
         self.assertEqual(rec["metadata"]["createdAt"], 1000)
         self.assertGreater(rec["metadata"]["updatedAt"], 1000)
@@ -563,6 +563,275 @@ class HttpTests(unittest.TestCase):
         codes = [self.call("POST", "/v1/pair", {"code": "ZZZZ-ZZZZ"}, {"X-Forwarded-For": "203.0.113.9"})[0] for _ in range(5)]
         self.assertEqual(codes[:3], [400, 400, 400])
         self.assertEqual(codes[3:], [429, 429])
+
+
+class VerifierTests(unittest.TestCase):
+    """Real RS256 verification with a locally generated key standing in for Google's."""
+
+    @classmethod
+    def setUpClass(cls):
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        from slant_ext.identity import FirebaseVerifier
+        cls.key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        cls.other = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        cls.v = FirebaseVerifier("proj", key_for=lambda kid: cls.key.public_key() if kid == "k1" else None)
+
+    def tok(self, key=None, kid="k1", alg="RS256", **over):
+        import jwt as pyjwt
+        now = int(time.time())
+        claims = {"iss": "https://securetoken.google.com/proj", "aud": "proj", "sub": "alice_1", "iat": now - 5, "exp": now + 3600,
+                  "auth_time": now - 5, "email": "a@x.com", "email_verified": True, "firebase": {"sign_in_provider": "google.com"}}
+        claims.update(over)
+        claims = {k: v for k, v in claims.items() if v is not None}
+        return pyjwt.encode(claims, key or self.key, algorithm=alg, headers={"kid": kid})
+
+    def test_valid_and_anonymous(self):
+        i = self.v.verify(self.tok())
+        self.assertEqual((i.uid, i.email, i.anonymous), ("alice_1", "a@x.com", False))
+        i = self.v.verify(self.tok(firebase={"sign_in_provider": "anonymous"}, email=None))
+        self.assertTrue(i.anonymous)
+        self.assertIsNone(self.v.verify(self.tok(email_verified=False)).email, "unverified email isn't shown")
+
+    def test_rejects(self):
+        from slant_ext.identity import TokenError
+        bad = [self.tok(key=self.other), self.tok(kid="k2"), self.tok(aud="other"), self.tok(iss="https://evil"),
+               self.tok(exp=int(time.time()) - 600), self.tok(sub="a/b"), self.tok(sub=None), self.tok(auth_time=int(time.time()) + 600),
+               "x.y.z", "", None, self.tok()[:-4] + "AAAA"]
+        import jwt as pyjwt
+        bad.append(pyjwt.encode({"sub": "alice_1", "aud": "proj"}, "secret", algorithm="HS256", headers={"kid": "k1"}))
+        for t in bad:
+            with self.assertRaises(TokenError, msg=str(t)[:40]):
+                self.v.verify(t)
+
+
+class FakeVerifier:
+    def __init__(self):
+        from slant_ext.identity import Identity
+        self.ids = {"tok-alice": Identity("alice", "alice@x.com", "google.com"), "tok-bob": Identity("bob", "bob@x.com", "google.com"),
+                    "tok-carol": Identity("carol", None, "password"), "tok-dave": Identity("dave", "d@x.com", "google.com"),
+                    "tok-erin": Identity("erin", "e@x.com", "google.com"), "tok-guest": Identity("guest", None, "anonymous"),
+                    "tok-owner": Identity("OWNER_UID", "o@x.com", "google.com"), "tok-ed": Identity("editor-uid", None, "google.com")}
+
+    def verify(self, token):
+        from slant_ext.identity import TokenError
+        if token not in self.ids:
+            raise TokenError("bad")
+        return self.ids[token]
+
+
+class PublicAccessTests(unittest.TestCase):
+    """Ordinary Mana accounts pair and manage only their own browsers; everything still bills the owner, under limits."""
+
+    def setUp(self):
+        import server
+        from http.server import ThreadingHTTPServer
+        self.store, self.fb, self.records, self.prov, self.jobs, self.auth, _ = fresh_env(
+            tree=saved_tree(), limits={"account_daily": 2, "account_max_browsers": 2, "account_codes_per_hour": 50})
+        grant = "OWNER_UID/file-system/apps/slant-extension/metadata/permissions/write/editor-uid"
+        real_read = self.fb.read
+        self.fb.read = lambda path: True if path == grant else real_read(path)
+        self.jobs.start()
+        lim = dict(self.jobs.limits)
+        self.app = server.App(self.store, self.auth, self.records, self.jobs, self.prov, SPEC, lim, "OWNER_UID", "ADMIN_SECRET",
+                              trust_sender_uid=True, verifier=FakeVerifier())
+        self.srv = ThreadingHTTPServer(("127.0.0.1", 0), server.make_handler(self.app))
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+        self.base = f"http://127.0.0.1:{self.srv.server_address[1]}"
+        self.ip = 0
+
+    def tearDown(self):
+        self.srv.shutdown()
+        self.srv.server_close()
+        self.jobs.stop()
+
+    call = HttpTests.call
+
+    def as_(self, who, sender=None):
+        h = {"X-Slant-Id-Token": "tok-" + who}
+        if sender:
+            h["X-Sender-Uid"] = sender
+        return h
+
+    def code(self, who):
+        s, b = self.call("POST", "/v1/me/pairing-codes", {}, self.as_(who))
+        self.assertEqual(s, 200, b)
+        return b["code"]
+
+    def redeem(self, code, label="Chrome"):
+        self.ip += 1
+        return self.call("POST", "/v1/pair", {"code": code, "label": label}, {"X-Forwarded-For": "10.1.0.%d" % self.ip})
+
+    def pair(self, who, label="Chrome"):
+        s, b = self.redeem(self.code(who), label)
+        self.assertEqual(s, 200, b)
+        return b["credential"], b["credentialId"]
+
+    def test_sign_in_required(self):
+        self.assertEqual(self.call("GET", "/v1/me/status")[0], 401)
+        self.assertEqual(self.call("GET", "/v1/me/status", headers={"X-Slant-Id-Token": "forged"})[0], 401)
+        self.assertEqual(self.call("GET", "/v1/me/status", headers={"X-Sender-Uid": "alice"})[0], 401, "a bare uid header is not identity")
+        s, b = self.call("POST", "/v1/me/pairing-codes", {}, self.as_("guest"))
+        self.assertEqual((s, b["error"]["code"]), (403, "sign_in_required"))
+        self.assertEqual(self.call("GET", "/v1/me/status", headers=self.as_("alice", sender="bob"))[0], 403, "token and forward-auth disagree")
+        self.assertEqual(self.call("GET", "/v1/me/status", headers=self.as_("alice", sender="alice"))[0], 200)
+
+    def test_two_accounts_are_isolated(self):
+        ka, ca = self.pair("alice", "Alice laptop")
+        kb, cb = self.pair("bob", "Bob laptop")
+        s, a = self.call("GET", "/v1/me/status", headers=self.as_("alice"))
+        self.assertEqual((s, a["role"], [c["id"] for c in a["credentials"]]), (200, "user", [ca]))
+        self.assertEqual(a["usage"]["accountDaily"], 2)
+        s, b = self.call("GET", "/v1/me/status", headers=self.as_("bob"))
+        self.assertEqual([c["id"] for c in b["credentials"]], [cb])
+        self.assertEqual(self.call("POST", f"/v1/me/credentials/{ca}/revoke", {}, self.as_("bob"))[0], 404)
+        self.assertEqual(self.call("GET", "/v1/session", headers={"X-Slant-Key": ka})[0], 200, "bob couldn't revoke alice's browser")
+        for path, method in (("/v1/owner/status", "GET"), ("/v1/owner/pairing-codes", "POST"), (f"/v1/owner/credentials/{ca}/revoke", "POST"),
+                             ("/v1/owner/spec/sync", "POST"), (f"/v1/owner/credentials/{ca}/claim", "POST")):
+            self.assertEqual(self.call(method, path, {} if method == "POST" else None, self.as_("bob", sender="bob"))[0], 403, path)
+        s, r = self.call("POST", f"/v1/me/credentials/{ca}/revoke", {}, self.as_("alice"))
+        self.assertEqual((s, r["revoked"]), (200, True))
+        self.assertEqual(self.call("GET", "/v1/session", headers={"X-Slant-Key": ka})[0], 401)
+        self.assertEqual(self.call("GET", "/v1/session", headers={"X-Slant-Key": kb})[0], 200)
+        job, _ = self.jobs.submit(self.auth.check(kb), "https://youtu.be/lmjHE8CEhPM", "iso-feed-1")
+        self.assertEqual(self.store.one("SELECT uid FROM credentials WHERE id=?", (cb,))["uid"], "bob", "bob's browser fills bob's feed")
+
+    def test_codes_dont_evict_other_accounts(self):
+        a1, a2 = self.code("alice"), self.code("alice")
+        for _ in range(3):
+            self.code("bob")
+        self.assertEqual(self.redeem(a1)[0], 200)
+        self.assertEqual(self.redeem(a2)[0], 200)
+        a3, a4, a5 = self.code("dave"), self.code("dave"), self.code("dave")
+        self.assertEqual(self.redeem(a3)[0], 400, "an account keeps only its 2 newest codes")
+
+    def test_browser_cap(self):
+        self.pair("carol")
+        k2, c2 = self.pair("carol")
+        s, b = self.call("POST", "/v1/me/pairing-codes", {}, self.as_("carol"))
+        self.assertEqual((s, b["error"]["code"]), (409, "browser_limit"))
+        self.call("POST", f"/v1/me/credentials/{c2}/revoke", {}, self.as_("carol"))
+        spare = self.code("carol")
+        self.pair("carol")                                     # back at the cap
+        s, b = self.redeem(spare)
+        self.assertEqual((s, b["error"]["code"]), (409, "browser_limit"), "an outstanding code can't exceed the cap")
+
+    def test_account_quota_survives_repairing(self):
+        k1, c1 = self.pair("dave")
+        for i, vid in enumerate(("m75pPeman4Q", "g2APwypRIX0")):
+            j, _ = self.jobs.submit(self.auth.check(k1), "https://youtu.be/" + vid, f"q-{i}-abcdef")
+            wait_for(lambda: self.store.job(j["id"])["state"] == "done")
+        self.call("POST", f"/v1/me/credentials/{c1}/revoke", {}, self.as_("dave"))
+        k2, _ = self.pair("dave")
+        with self.assertRaises(ApiError) as cm:
+            self.jobs.submit(self.auth.check(k2), "https://youtu.be/oAG7ekh3878", "q-3-abcdef")
+        self.assertEqual(cm.exception.code, "daily_limit")
+        self.assertIn("Mana account", cm.exception.message)
+        j, _ = self.jobs.submit(self.auth.check(k2), "https://youtu.be/lmjHE8CEhPM", "q-4-abcdef")
+        self.assertTrue(j["cached"], "saved analyses still open at the account limit")
+        s, st = self.call("GET", "/v1/me/status", headers=self.as_("dave"))
+        self.assertEqual(st["usage"]["newAnalysesLast24h"], 2)
+        ke, _ = self.pair("erin")
+        j, _ = self.jobs.submit(self.auth.check(ke), "https://youtu.be/oAG7ekh3878", "q-5-abcdef")
+        self.assertTrue(j["paid"], "another account has its own allowance")
+
+    def test_account_concurrency(self):
+        k1, _ = self.pair("alice")
+        k2, _ = self.pair("alice")
+        self.prov.block = threading.Event()
+        try:
+            self.jobs.submit(self.auth.check(k1), "https://youtu.be/m75pPeman4Q", "c-1-abcdef")
+            with self.assertRaises(ApiError) as cm:
+                self.jobs.submit(self.auth.check(k2), "https://youtu.be/g2APwypRIX0", "c-2-abcdef")
+            self.assertEqual(cm.exception.code, "busy")
+        finally:
+            self.prov.block.set()
+
+    def test_overall_cap_limits_only_public_accounts(self):
+        self.jobs.limits["global_daily"] = 1
+        try:
+            kt, _ = self.pair("ed")
+            for i, vid in enumerate(("m75pPeman4Q", "g2APwypRIX0")):
+                j, _ = self.jobs.submit(self.auth.check(kt), "https://youtu.be/" + vid, f"g-{i}-abcdef")
+                self.assertTrue(j["paid"])
+                self.assertEqual(j["public"], 0)
+                wait_for(lambda: self.store.job(j["id"])["state"] == "done")
+            ka, _ = self.pair("alice")
+            j, _ = self.jobs.submit(self.auth.check(ka), "https://youtu.be/oAG7ekh3878", "g-3-abcdef")
+            self.assertEqual(j["public"], 1, "team analyses didn't use up the public allowance")
+            wait_for(lambda: self.store.job(j["id"])["state"] == "done")
+            kb, _ = self.pair("bob")
+            with self.assertRaises(ApiError) as cm:
+                self.jobs.submit(self.auth.check(kb), "https://youtu.be/Pam3R6o-_qI", "g-4-abcdef")
+            self.assertEqual(cm.exception.code, "daily_limit")
+            j, _ = self.jobs.submit(self.auth.check(kt), "https://youtu.be/Pam3R6o-_qI", "g-5-abcdef")
+            self.assertTrue(j["paid"], "the team still analyzes after the public cap is reached")
+            s, st = self.call("GET", "/v1/me/status", headers=self.as_("bob"))
+            self.assertEqual(st["usage"]["globalUsed"], 1)
+        finally:
+            self.jobs.limits["global_daily"] = config.DEFAULT_LIMITS["global_daily"]
+
+    def test_website_analyses_team_only(self):
+        s, b = self.call("POST", "/v1/me/analyze", {"url": "https://youtu.be/m75pPeman4Q", "idempotencyKey": "web-a-12345"}, self.as_("alice"))
+        self.assertEqual((s, b["error"]["code"]), (403, "view_only"), "ordinary accounts can't start website analyses")
+        self.assertEqual(self.call("POST", "/v1/me/analyze", {"url": "https://youtu.be/m75pPeman4Q"}, self.as_("guest"))[0], 403)
+        self.assertEqual(self.call("POST", "/v1/me/analyze", {"url": "https://youtu.be/m75pPeman4Q"})[0], 401)
+        s, b = self.call("POST", "/v1/me/analyze", {"url": "https://youtu.be/m75pPeman4Q", "idempotencyKey": "web-e-12345"}, self.as_("ed"))
+        self.assertEqual(s, 202, b)
+        jid = b["job"]["id"]
+        wait_for(lambda: self.call("GET", "/v1/me/jobs/" + jid, headers=self.as_("ed"))[1]["job"]["state"] == "done")
+        s, v = self.call("GET", "/v1/me/jobs/" + jid, headers=self.as_("ed"))
+        rid = v["job"]["result"]["recordId"]
+        rec = self.fb.read(APP + "/analyses/" + rid)
+        self.assertEqual(rec["via"], "app")
+        self.assertEqual(self.call("GET", "/v1/me/jobs/" + jid, headers=self.as_("owner"))[0], 404, "jobs are per person")
+        self.assertEqual(self.call("GET", "/v1/me/jobs/" + jid, headers=self.as_("alice"))[0], 403)
+        st = self.call("GET", "/v1/me/status", headers=self.as_("ed"))[1]
+        self.assertEqual(st["credentials"], [], "the website key isn't listed as a browser")
+        adm = self.call("GET", "/v1/owner/status", headers={"X-Sender-Uid": "OWNER_UID"})[1]
+        self.assertFalse([c for c in adm["credentials"] if c["id"].startswith("web_")])
+        self.assertTrue(self.store.job(jid)["paid"] and not self.store.job(jid)["public"])
+
+    def test_website_reanalyze_targets_the_shown_report(self):
+        older = dict(self.fb.read(APP + "/analyses/v1000"), metadata={"type": "entry", "createdAt": 500, "updatedAt": 500})
+        self.fb.update(APP, {"analyses/v500": older, "transcripts/v500": {"snippets": self.fb.read(APP + "/transcripts/v1000/snippets")}})
+        self.prov.analyze_result = report(score=5)
+        s, b = self.call("POST", "/v1/me/analyze", {"url": "https://youtu.be/lmjHE8CEhPM", "mode": "fresh", "recordId": "v500",
+                                                    "idempotencyKey": "web-r-12345"}, self.as_("ed"))
+        self.assertEqual(s, 202, b)
+        wait_for(lambda: self.store.job(b["job"]["id"])["state"] == "done")
+        self.assertEqual(self.store.job(b["job"]["id"])["record_id"], "v500")
+        self.assertEqual(self.fb.read(APP + "/analyses/v500/result/political/score"), 5)
+        self.assertNotEqual(self.fb.read(APP + "/analyses/v1000/result/political/score"), 5, "the newer report was left alone")
+        s, b = self.call("POST", "/v1/me/analyze", {"url": "https://youtu.be/lmjHE8CEhPM", "mode": "fresh", "recordId": "../x",
+                                                    "idempotencyKey": "web-r-67890"}, self.as_("ed"))
+        self.assertEqual(s, 400)
+
+    def test_website_key_has_no_daily_browser_cap(self):
+        self.jobs.limits["per_browser_daily"] = 1
+        try:
+            for i, vid in enumerate(("m75pPeman4Q", "g2APwypRIX0")):
+                s, b = self.call("POST", "/v1/me/analyze", {"url": "https://youtu.be/" + vid, "idempotencyKey": f"web-c-{i}2345"}, self.as_("ed"))
+                self.assertEqual(s, 202, b)
+                wait_for(lambda: self.store.job(b["job"]["id"])["state"] == "done")
+        finally:
+            self.jobs.limits["per_browser_daily"] = config.DEFAULT_LIMITS["per_browser_daily"]
+
+    def test_team_is_exempt_and_sees_who_paired(self):
+        for who in ("owner", "ed"):
+            for _ in range(3):
+                self.pair(who)                               # past the 2-browser cap
+        s, st = self.call("GET", "/v1/me/status", headers=self.as_("ed"))
+        self.assertEqual((st["role"], st["usage"]["accountDaily"], st["limits"]["max_browsers"]), ("team", None, None))
+        k, _ = self.pair("ed")
+        for i, vid in enumerate(("m75pPeman4Q", "g2APwypRIX0", "oAG7ekh3878")):
+            j, _ = self.jobs.submit(self.auth.check(k), "https://youtu.be/" + vid, f"t-{i}-abcdef")
+            self.assertTrue(j["paid"])
+            wait_for(lambda: self.store.job(j["id"])["state"] == "done")
+        self.pair("alice")
+        s, adm = self.call("GET", "/v1/owner/status", headers={"X-Sender-Uid": "OWNER_UID"})
+        kinds = {c["pairedBy"]: c["kind"] for c in adm["credentials"]}
+        self.assertEqual((kinds["alice@x.com"], kinds["o@x.com"]), ("public", "team"))
+        self.assertNotIn("uid", adm["credentials"][0])
 
 
 if __name__ == "__main__":

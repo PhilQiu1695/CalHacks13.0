@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Real-browser checks for Slant for YouTube 1.4 (no side panel: the bear and its card are the interface).
+"""Real-browser checks for Slant for YouTube 1.6 (no side panel: the bear, its speech bubble and the card are the interface).
 Bundled Chromium, headed under Xvfb, with the unpacked extension; the bear's closed shadow root is read through DevTools
 (DOM.getDocument with pierce) and clicked with real mouse events; the setup page is driven directly.
 
@@ -137,7 +137,7 @@ def main():
 
         def done_tip():
             t = bear.tip() or ""
-            return t if "slant" in t and "Tap for details" in t else None
+            return t if ("Tap me for results" in t or "Tap me again to hide" in t) else None
 
         # ---------------- C1 ----------------
         name = "C1 unpaired: the bear says 'Set up Slant'; a tap opens the setup page; pairing analyzes the waiting video (saved, free)"
@@ -166,7 +166,7 @@ def main():
             ext = ctx.new_page(); ext.goto(f"chrome-extension://{ext_id}/setup.html")
 
         # ---------------- C2 ----------------
-        name = "C2 card: one centre line, lean spectrum + words, 'How slanted' 0–10 in words, five signals, equal Close / Full report buttons linking to this video's report"
+        name = "C2 card: one centre line (bear, bubble, card), lean on the AllSides scale in words, five signals out of 10, equal Close / Full report buttons, no scrollbar, readable fonts"
         try:
             yt.bring_to_front()
             canvas = bear.rect("canvas"); tip = bear.rect(".tip")
@@ -184,35 +184,36 @@ def main():
             centred = abs(cx(card) - cx(canvas)) <= 1 and abs(cx(tip) - cx(canvas)) <= 1
             equal = len(btns) == 2 and abs(btns[0]["w"] - btns[1]["w"]) <= 1 and btns[0]["h"] == btns[1]["h"]
             inside = all(b["x"] >= card["x"] + 8 and b["r"] <= card["r"] - 8 for b in btns)
-            words = all(s in txt for s in ("HOW SLANTED", "out of 10", "Fair and balanced", "Extreme", "WHAT DRIVES THE SCORE")) and \
-                    (("POLITICAL LEAN" in txt and "of ±6" in txt and "AllSides" in txt) or "Not political" in txt)
-            tip_hidden = not bear.visible(".tip")
+            words = all(s in txt for s in ("OTHER SIGNALS", "/ 10")) and \
+                    (("POLITICAL LEAN" in txt and "AllSides scale" in txt and "−6 to +6" in txt) or "Not political" in txt)
+            tip_hidden = "Tap me again to hide" in (bear.tip() or "")      # 1.6: the bubble stays and says how to hide the card
+            nobar = bear.call(".card .body", "function(){ return this.offsetWidth - this.clientWidth; }")
+            fonts = bear.call(".tip", "function(){ return [parseFloat(getComputedStyle(this.querySelector('.t1')).fontSize), parseFloat(getComputedStyle(this.querySelector('.t2')).fontSize)]; }")
+            arrow = bear.rect(".ar-o")
+            tip_hidden = tip_hidden and nobar == 0 and fonts[0] >= 22 and fonts[1] >= 18 and abs(cx(arrow) - cx(canvas)) <= 1
             in_view = card["b"] <= yt.viewport_size["height"]
             bear.shot("C2-card-" + A)
             record(name, centred and equal and inside and words and len(sigs) == 5 and link and link["href"] == murl and link["target"] == "_blank"
                    and "noopener" in link["rel"] and ov <= 0 and tip_hidden and in_view,
                    f"centres card/tip/bear {cx(card):.1f}/{cx(tip):.1f}/{cx(canvas):.1f}; buttons {[(b['t'], b['w']) for b in btns]}; inside={inside}; "
-                   f"words={words}; signals={len(sigs)}; link={'ok' if link and link['href']==murl else link}; overflow={ov}; label hidden={tip_hidden}; in view={in_view}")
+                   f"words={words}; signals={len(sigs)}; link={'ok' if link and link['href']==murl else link}; overflow={ov}; bubble/scrollbar/fonts ok={tip_hidden} (scrollbar {nobar}px, fonts {fonts}); in view={in_view}")
         except Exception as e:
             record(name, False, repr(e)[:300]); traceback.print_exc()
 
         # ---------------- C3 ----------------
-        name = "C3 interactions: a signal expands its explanation and collapses; Escape, Close and a second bear tap all hide the card"
+        name = "C3 interactions: Escape, Close and a second bear tap all hide the card; the card body scrolls with the wheel"
         step = "start"
         try:
             if not bear.card_open():
                 bear.click("canvas"); wait_until(bear.card_open, 5)
-            step = "expand signal"
-            bear.click(".sig")
-            opened = wait_until(lambda: bear.visible(".why") and bear.call(".sig", "function(){return this.getAttribute('aria-expanded')}") == "true", 5)
-            why = bear.text(".why")
-            bear.shot("C3-signal-open")
-            step = "collapse signal"
-            bear.click(".sig")
-            collapsed = wait_until(lambda: not bear.visible(".why"), 5)
+            step = "wheel scroll"
+            r = bear.rect(".card .body")
+            yt.mouse.move(r["x"] + r["w"] / 2, r["y"] + r["h"] / 2)
+            yt.mouse.wheel(0, 300); time.sleep(0.4)
+            scrolled = bear.call(".card .body", "function(){ return this.scrollHeight <= this.clientHeight || this.scrollTop > 0; }")
             step = "escape"
             yt.keyboard.press("Escape")
-            esc = wait_until(lambda: not bear.card_open() and bear.visible(".tip"), 5)
+            esc = wait_until(lambda: not bear.card_open() and "Tap me for results" in (bear.tip() or ""), 5)
             step = "reopen"
             bear.click("canvas"); wait_until(bear.card_open, 5)
             step = "close button"
@@ -223,7 +224,7 @@ def main():
             step = "tap bear to hide"
             bear.click("canvas")
             toggled = wait_until(lambda: not bear.card_open() and bear.visible(".tip"), 5)
-            record(name, opened and collapsed and esc and closed and toggled, f"explanation={why[:80]!r}…")
+            record(name, scrolled and esc and closed and toggled, f"wheel scroll={scrolled}, escape={esc}, close={closed}, tap again={toggled}")
         except Exception as e:
             record(name, False, "at step " + step + ": " + repr(e)[:250]); traceback.print_exc()
 
@@ -244,22 +245,23 @@ def main():
             record(name, False, repr(e)[:300])
 
         # ---------------- C5 ----------------
-        name = "C5 'Analyze again' asks first, runs (simulated, free) with live steps, and a simulated result hides the report link"
+        name = "C5 analyzing (simulated, free): the bubble shows live steps and seconds in readable type; a simulated result hides the report link"
         try:
+            ext_eval(f"chrome.storage.local.get(['reqs','bearCache']).then(o => {{ const r = o.reqs || {{}}, c = o.bearCache || {{}}; delete r[{json.dumps(A)}]; delete c[{json.dumps(A)}]; return chrome.storage.local.set({{reqs: r, bearCache: c}}); }})")
             ext_eval("chrome.storage.local.set({debug: {simulate: 'slow-success'}})")
-            yt.bring_to_front()
-            bear.click("canvas"); wait_until(bear.card_open, 5)
-            bear.click("#slant-again")
-            conf = wait_until(lambda: bear.text(".confirm"), 5)
-            bear.shot("C5-confirm")
-            bear.click("#slant-confirm-again")
-            steps = set()
+            nav(A)
+            wait_until(lambda: "Tap me to analyze" in (bear.tip() or ""), 10)
+            bear.click("canvas")
+            steps, secs = set(), set()
             def analyzing():
                 t = bear.tip() or ""
                 if "Analyzing" in t:
-                    steps.add(t.split("\n")[-1].split(" · ")[0])
+                    last = t.split("\n")[-1]
+                    steps.add(last.split(" · ")[0])
+                    if " · " in last and last.endswith(" s"): secs.add(last.split(" · ")[1])
                 return "Analyzing" in t
             wait_until(analyzing, 10)
+            sub_px = bear.call(".t2", "function(){ return parseFloat(getComputedStyle(this).fontSize); }")
             bear.shot("C5-analyzing")
             end = time.time() + 45
             while time.time() < end and not done_tip():
@@ -268,10 +270,10 @@ def main():
             bear.click("canvas"); wait_until(bear.card_open, 5)
             no_link = not bear.visible("#slant-report")
             one = bear.call(".card .acts", "function(){ return this.classList.contains('one'); }")
-            foot = bear.text(".foot")
+            note = bear.text(".card .note") or ""
             bear.shot("C5-simulated")
-            record(name, "replaces the saved result" in conf and r["job"]["simulated"] and r["mode"] == "fresh" and no_link and one and "Simulated" in foot and len(steps) >= 2,
-                   f"steps seen={sorted(steps)}, simulated={r['job']['simulated']}, mode={r['mode']}, report link hidden={no_link}, single full-width Close={one}, foot={foot!r}")
+            record(name, r["job"]["simulated"] and no_link and one and "Simulated" in note and len(steps) >= 2 and len(secs) >= 2 and sub_px >= 18,
+                   f"steps seen={sorted(steps)}, seconds seen={len(secs)}, step font={sub_px}px, simulated={r['job']['simulated']}, report link hidden={no_link}, single full-width Close={one}, note={note!r}")
         except Exception as e:
             record(name, False, repr(e)[:300]); traceback.print_exc()
         finally:
@@ -368,7 +370,7 @@ def main():
             record(name, False, repr(e)[:300]); traceback.print_exc()
 
         # ---------------- C10 ----------------
-        name = "C10 short window (1100×620): the card stays on screen and scrolls inside itself"
+        name = "C10 short window (1100×620): the card stays on screen, its body scrolls and the Close / Full report buttons stay visible"
         try:
             yt.bring_to_front()
             yt.set_viewport_size({"width": 1100, "height": 620})
@@ -377,10 +379,11 @@ def main():
                 bear.click("canvas")
             wait_until(bear.card_open, 5)
             card = bear.rect(".card")
-            scrolls = bear.call(".card", "function(){ return this.scrollHeight > this.clientHeight; }")
+            scrolls = bear.call(".card .body", "function(){ return this.scrollHeight > this.clientHeight; }")
             ov = bear.call(".card", "function(){ return this.scrollWidth - this.clientWidth; }")
             bear.shot("C10-short-window")
-            ok = card["b"] <= 620 and scrolls and ov <= 0 and card["r"] <= 1100
+            foot = bear.rect(".card .foot")
+            ok = card["b"] <= 620 and scrolls and ov <= 0 and card["r"] <= 1100 and foot and foot["b"] <= 620
             record(name, ok, f"card bottom={card['b']:.0f}, right={card['r']:.0f}, scrolls={scrolls}, overflow={ov}")
         except Exception as e:
             record(name, False, repr(e)[:300]); traceback.print_exc()

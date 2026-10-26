@@ -101,6 +101,22 @@ function viewConnect(m) {
     h('p', { class: 'note' }, 'New analyses run on the Mana credits of the person who owns this Slant backend. Saved analyses open without new charges.'));
 }
 
+// Link to this browser's feed on Slant (the Slant page address the backend returned when the browser paired, plus ?slant=feed).
+function feedUrl(c) {
+  try { const u = new URL(c && c.appUrl); if (u.protocol !== 'https:') return null; u.searchParams.set('slant', 'feed'); return u.toString(); }
+  catch { return null; }
+}
+
+function viewFeed(c) {
+  const url = feedUrl(c);
+  if (!url) return null;
+  return h('section', { class: 'card', id: 'feed' },
+    h('div', { class: 'label' }, 'Your feed'),
+    h('p', { class: 'prose' }, 'Every video you analyze with our extension is saved to your feed on Slant, where you can view the average lean of the media you consume.'),
+    h('div', { class: 'row mt' },
+      h('a', { class: 'btn primary', id: 'open-feed', href: url, target: '_blank', rel: 'noopener' }, 'Open your feed ', h('span', { 'aria-hidden': 'true' }, '↗'))));
+}
+
 function viewConnected() {
   const c = st.conn;
   const soon = c.linkExp && c.linkExp - Date.now() < 3 * 86400000;
@@ -121,6 +137,7 @@ function viewConnected() {
         h('button', { class: 'btn', id: 'update-open', onclick: () => { st.editing = true; st.error = null; render(); } }, 'Update connection link'),
         h('button', { class: 'btn', id: 'disconnect', onclick: disconnect }, 'Disconnect')),
       h('p', { class: 'note' }, 'Disconnecting removes the key from this browser only. To revoke it, use Paired browsers in Slant for Chrome in Mana.')),
+    viewFeed(c),
     h('section', { class: 'card' },
       h('div', { class: 'label' }, 'How to use it'),
       h('p', { class: 'prose' }, 'Open a YouTube video or Short and tap the bear at the top right (or press Alt+Shift+S). Tap it again for the details, and open the full report for quotes and the transcript.')));

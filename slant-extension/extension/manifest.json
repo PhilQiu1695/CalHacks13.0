@@ -2,8 +2,8 @@
   "manifest_version": 3,
   "name": "Slant for YouTube",
   "short_name": "Slant",
-  "version": "1.4.0",
-  "description": "See how slanted a YouTube video is. Tap the bear on the video for a plain-language summary and a link to the full report.",
+  "version": "1.6.0",
+  "description": "See how slanted a YouTube video is. Tap the bear on the video for its political lean and five signals, with a link to the full report.",
   "minimum_chrome_version": "116",
   "action": {
     "default_title": "Slant: analyze this video",

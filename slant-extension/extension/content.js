@@ -1,15 +1,16 @@
 // Slant bear: a small pixel bear that floats at the top right of a YouTube watch page or Short. It is the whole interface:
 // there is no side panel.
-//   idle      -> neutral bear, "Tap to analyze"
-//   analyzing -> bear bobbing, "Analyzing…" with the current step
+//   idle      -> neutral bear, "Tap me to analyze"
+//   analyzing -> bear bobbing, "Analyzing…" with the current step and seconds
 //   done      -> bear reshaped by the analysis (body color, eyebrows, eyes, ears); a tap opens the details card
 //   failed    -> sleepy bear, "Couldn't analyze"; a tap opens the card with the reason and Try again
 //   setup     -> "Set up Slant": a tap opens the extension's setup page (pairing / reconnect)
+// One centre line: the bear, the pixel speech bubble under it and the card share the same axis.
 // A tap asks the background worker to analyze (or reopen) this video; the worker runs the job on the Slant backend and
 // saves its progress in chrome.storage.local ("reqs", one entry per video), which the bear follows.
-// The card says everything in words with plain scales, so the bear's look is never the only cue. Lean bands and score
-// words mirror the Slant app (LEAN_BANDS, leanBand, biasWord in lib/slant-core.js); tests/test_extension.mjs checks they match.
-// All text is inserted as text nodes, never as HTML.
+// The bear's drawing comes from lib/bear.js (inlined below by scripts/build_bear.py). The card says the lean in words on
+// the AllSides scale and gives the five signals as 0-10 bars. Lean bands mirror the Slant app (LEAN_BANDS, leanBand in
+// lib/slant-core.js); tests/test_extension.mjs checks they match. All text is inserted as text nodes, never as HTML.
 (() => {
   if (window.__slantBear) return;
   window.__slantBear = true;
@@ -19,74 +20,130 @@
   const CACHE_MAX = 50;
   const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-  // ---------- pixel bear ----------
-  const W = 48, H = 62, D = 4;
-  const BLUE = [[58,112,246],[36,82,208]], PURP = [[183, 156, 237], [155, 123, 219]], RED = [[238,74,74],[196,44,44]];
-  const mixc = (a, b, t) => 'rgb(' + [0, 1, 2].map((i) => Math.round(a[i] + (b[i] - a[i]) * t)).join(',') + ')';
-  const clamp = (v, a, b) => Math.min(b, Math.max(a, Number(v) || 0));
-  const mk = () => Array.from({ length: H }, () => new Uint8Array(W));
-  const put = (m, x, y, c) => { if (x >= 0 && x < W && y >= 0 && y < H) m[y][x] = c; };
-  function ell(m, cx, cy, rx, ry, c, sh) {
-    for (let y = Math.floor(cy - ry) - 1; y <= Math.ceil(cy + ry) + 1; y++)
-      for (let x = Math.floor(cx - rx) - 1; x <= Math.ceil(cx + rx) + 1; x++) {
-        const dx = (x + 0.5 - cx) / rx, dy = (y + 0.5 - cy) / ry;
-        if (dx * dx + dy * dy <= 1) put(m, x, y, (sh && dx * 0.6 + dy * 0.8 > 0.55) ? sh : c);
-      }
-  }
-  function ln(m, x1, y1, x2, y2, r, c) {
-    const n = Math.ceil(Math.hypot(x2 - x1, y2 - y1) * 4) + 1;
-    for (let i = 0; i <= n; i++) { const t = i / n; ell(m, x1 + (x2 - x1) * t, y1 + (y2 - y1) * t, r, r, c); }
-  }
-  // v: { L: -6..6 lean, S: sensationalism, K: loaded language, P: personal attacks, U: unsupported claims, O: one-sidedness (all 0..10) }
-  // opt: { sleepy: bool, oy: bob offset }
-  function compose(v, opt) {
-    opt = opt || {};
-    const a = clamp(v.L, -6, 6) / 6, t = Math.max(v.S, v.K, v.P) / 10, r = clamp(v.U, 0, 10) / 10, o = clamp(v.O, 0, 10) / 10;
-    const m = mk(), tg = a < 0 ? BLUE : RED, k = Math.abs(a);
-    const PAL = ['', '#3F2670', mixc(PURP[0], tg[0], k), mixc(PURP[1], tg[1], k), '#EADCFB', '#FFFFFF',
-      mixc([43, 27, 77], [154, 143, 184], Math.min(1, r * 1.2)), '#F3A9D0', '#F7EEFF'];
-    const oy = opt.oy || 0, Y = (q) => q + D + oy;
-    const sd = clamp(v.L / 3, -1, 1), rg = Math.max(0, sd) * o, lg = Math.max(0, -sd) * o;   // the ear on the lean side grows
-    const re = 4.6 * (1 + 0.8 * rg - 0.45 * lg), le = 4.6 * (1 + 0.8 * lg - 0.45 * rg);
-    const rcx = 36 + 2.5 * rg, rcy = Y(9) - 1.2 * rg, lcx = 12 - 2.5 * lg, lcy = Y(9) - 1.2 * lg;
-    ell(m, lcx, lcy, le, le, 2, 3); ell(m, rcx, rcy, re, re, 2, 3);
-    ell(m, lcx, lcy + 0.6, le * 0.5, le * 0.5, 4); ell(m, rcx, rcy + 0.6, re * 0.5, re * 0.5, 4);
-    ell(m, 24, Y(40), 9.5, 10, 2, 3); ell(m, 24, Y(41), 5.8, 6.8, 8); put(m, 21, Y(37), 5);
-    const gy = D + 54 + oy;
-    ell(m, 19.5, gy + 2 - 2.6, 5.2, 3.6, 1); ell(m, 28.5, gy + 2 - 2.6, 5.2, 3.6, 1);
-    ell(m, 19.5, gy - 0.6, 4.2, 2.6, 2, 3); ell(m, 28.5, gy - 0.6, 4.2, 2.6, 2, 3);
-    ln(m, 15, Y(35), 13, Y(43), 3, 1); ln(m, 33, Y(35), 35, Y(43), 3, 1);
-    ell(m, 13, Y(44), 3.6, 3.6, 1); ell(m, 35, Y(44), 3.6, 3.6, 1);
-    ln(m, 15, Y(35), 13, Y(43), 2, 2); ln(m, 33, Y(35), 35, Y(43), 2, 2);
-    ell(m, 13, Y(44), 2.6, 2.6, 2, 3); ell(m, 35, Y(44), 2.6, 2.6, 2, 3);
-    ell(m, 24, Y(20), 16.5, 14, 1); ell(m, 24, Y(20), 15.5, 13, 2, 3); ell(m, 24, Y(26), 5.2, 3.4, 4);
-    put(m, 23, Y(24), 1); put(m, 24, Y(24), 1); put(m, 23, Y(27), 1); put(m, 24, Y(27), 1);
-    put(m, 15, Y(25), 7); put(m, 16, Y(25), 7); put(m, 32, Y(25), 7); put(m, 33, Y(25), 7);
-    const dh = Math.round(t * 4), up = Math.round(t * 2), thick = t >= 0.6;
-    for (let x = 16; x <= 22; x++) { const yl = Y(15) - up + Math.round(dh * (x - 16) / 6); put(m, x, yl, 1); if (thick) put(m, x, yl + 1, 1); }
-    for (let x = 26; x <= 32; x++) { const yr = Y(15) - up + Math.round(dh * (32 - x) / 6); put(m, x, yr, 1); if (thick) put(m, x, yr + 1, 1); }
-    const ey = Y(20.5), spread = r > 0.6 ? 1 : 0, rr = opt.sleepy ? 1 : r;
-    [19, 29].forEach((ex, idx) => {
-      ell(m, ex, ey, 3.2, 3.2, 5);
-      const pxs = ex + (idx === 0 ? -spread : spread);
-      ell(m, pxs, ey, 2, 2, 6);
-      if (rr < 0.35) { put(m, Math.floor(pxs - 1), Math.floor(ey - 1), 5); put(m, Math.floor(pxs + 0.5), Math.floor(ey + 0.5), 5); }
-      else if (rr < 0.7) put(m, Math.floor(pxs - 1), Math.floor(ey - 1), 5);
-      if (rr > 0.35) {
-        const lid = (rr - 0.35) / 0.65 * 0.55, edge = ey - 3.2 + lid * 6.4;
-        for (let y = Math.floor(ey - 4); y <= Math.ceil(ey + 4); y++) for (let x = Math.floor(ex - 4); x <= Math.ceil(ex + 4); x++) {
-          const dx = x + 0.5 - ex, dy = y + 0.5 - ey;
-          if (dx * dx + dy * dy <= 3.2 * 3.2) { if (y + 0.5 < edge) put(m, x, y, 2); else if (y + 0.5 < edge + 1) put(m, x, y, 1); }
+  // ---------- pixel bear: lib/bear.js ----------
+  // BEGIN bear.js (generated by scripts/build_bear.py from lib/bear.js; do not edit here)
+  const Bear = (() => {
+    // bear.js: the Slant bear as a standalone ES module (no DOM needed except draw()).
+    //
+    //   scoresFromResult(record.result)  -> { L, S, K, P, U, O }     one video
+    //   aggregate([scores, scores, ...]) -> { L, S, K, P, U, O, n, nPolitical, meanAbsLean, spread }   many videos
+    //   draw(canvas, scores, opts)       -> paints the bear on a 48x62 canvas (CSS: width 240px; image-rendering: pixelated)
+    //
+    // Score meaning (all 0..10 except L):
+    //   L lean -6..+6 (body color) | S sensationalism, K loaded language, P personal attacks (eyebrows, highest of three)
+    //   U unsupported claims (eyes) | O one-sidedness (ears: the ear on the lean side grows)
+
+    // ---------- pixel bear ----------
+    const W = 48, H = 62, D = 4;
+    const BLUE = [[58,112,246],[36,82,208]], PURP = [[183, 156, 237], [155, 123, 219]], RED = [[238,74,74],[196,44,44]];
+    const mixc = (a, b, t) => 'rgb(' + [0, 1, 2].map((i) => Math.round(a[i] + (b[i] - a[i]) * t)).join(',') + ')';
+    const clamp = (v, a, b) => Math.min(b, Math.max(a, Number(v) || 0));
+    const mk = () => Array.from({ length: H }, () => new Uint8Array(W));
+    const put = (m, x, y, c) => { if (x >= 0 && x < W && y >= 0 && y < H) m[y][x] = c; };
+    function ell(m, cx, cy, rx, ry, c, sh) {
+      for (let y = Math.floor(cy - ry) - 1; y <= Math.ceil(cy + ry) + 1; y++)
+        for (let x = Math.floor(cx - rx) - 1; x <= Math.ceil(cx + rx) + 1; x++) {
+          const dx = (x + 0.5 - cx) / rx, dy = (y + 0.5 - cy) / ry;
+          if (dx * dx + dy * dy <= 1) put(m, x, y, (sh && dx * 0.6 + dy * 0.8 > 0.55) ? sh : c);
         }
-      }
-    });
-    const out = mk();
-    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
-      if (m[y][x]) out[y][x] = m[y][x];
-      else if ((y > 0 && m[y - 1][x]) || (y < H - 1 && m[y + 1][x]) || (x > 0 && m[y][x - 1]) || (x < W - 1 && m[y][x + 1])) out[y][x] = 1;
     }
-    return { grid: out, pal: PAL };
-  }
+    function ln(m, x1, y1, x2, y2, r, c) {
+      const n = Math.ceil(Math.hypot(x2 - x1, y2 - y1) * 4) + 1;
+      for (let i = 0; i <= n; i++) { const t = i / n; ell(m, x1 + (x2 - x1) * t, y1 + (y2 - y1) * t, r, r, c); }
+    }
+    // v: { L: -6..6 lean, S: sensationalism, K: loaded language, P: personal attacks, U: unsupported claims, O: one-sidedness (all 0..10) }
+    // opt: { sleepy: bool, oy: bob offset }
+    function compose(v, opt) {
+      opt = opt || {};
+      const a = clamp(v.L, -6, 6) / 6, t = Math.max(v.S, v.K, v.P) / 10, r = clamp(v.U, 0, 10) / 10, o = clamp(v.O, 0, 10) / 10;
+      const m = mk(), tg = a < 0 ? BLUE : RED, k = Math.abs(a);
+      const PAL = ['', '#3F2670', mixc(PURP[0], tg[0], k), mixc(PURP[1], tg[1], k), '#EADCFB', '#FFFFFF',
+        mixc([43, 27, 77], [154, 143, 184], Math.min(1, r * 1.2)), '#F3A9D0', '#F7EEFF'];
+      const oy = opt.oy || 0, Y = (q) => q + D + oy;
+      const sd = clamp(v.L / 3, -1, 1), rg = Math.max(0, sd) * o, lg = Math.max(0, -sd) * o;   // the ear on the lean side grows
+      const re = 4.6 * (1 + 0.8 * rg - 0.45 * lg), le = 4.6 * (1 + 0.8 * lg - 0.45 * rg);
+      const rcx = 36 + 2.5 * rg, rcy = Y(9) - 1.2 * rg, lcx = 12 - 2.5 * lg, lcy = Y(9) - 1.2 * lg;
+      ell(m, lcx, lcy, le, le, 2, 3); ell(m, rcx, rcy, re, re, 2, 3);
+      ell(m, lcx, lcy + 0.6, le * 0.5, le * 0.5, 4); ell(m, rcx, rcy + 0.6, re * 0.5, re * 0.5, 4);
+      ell(m, 24, Y(40), 9.5, 10, 2, 3); ell(m, 24, Y(41), 5.8, 6.8, 8); put(m, 21, Y(37), 5);
+      const gy = D + 54 + oy;
+      ell(m, 19.5, gy + 2 - 2.6, 5.2, 3.6, 1); ell(m, 28.5, gy + 2 - 2.6, 5.2, 3.6, 1);
+      ell(m, 19.5, gy - 0.6, 4.2, 2.6, 2, 3); ell(m, 28.5, gy - 0.6, 4.2, 2.6, 2, 3);
+      ln(m, 15, Y(35), 13, Y(43), 3, 1); ln(m, 33, Y(35), 35, Y(43), 3, 1);
+      ell(m, 13, Y(44), 3.6, 3.6, 1); ell(m, 35, Y(44), 3.6, 3.6, 1);
+      ln(m, 15, Y(35), 13, Y(43), 2, 2); ln(m, 33, Y(35), 35, Y(43), 2, 2);
+      ell(m, 13, Y(44), 2.6, 2.6, 2, 3); ell(m, 35, Y(44), 2.6, 2.6, 2, 3);
+      ell(m, 24, Y(20), 16.5, 14, 1); ell(m, 24, Y(20), 15.5, 13, 2, 3); ell(m, 24, Y(26), 5.2, 3.4, 4);
+      put(m, 23, Y(24), 1); put(m, 24, Y(24), 1); put(m, 23, Y(27), 1); put(m, 24, Y(27), 1);
+      put(m, 15, Y(25), 7); put(m, 16, Y(25), 7); put(m, 32, Y(25), 7); put(m, 33, Y(25), 7);
+      const dh = Math.round(t * 4), up = Math.round(t * 2), thick = t >= 0.6;
+      for (let x = 16; x <= 22; x++) { const yl = Y(15) - up + Math.round(dh * (x - 16) / 6); put(m, x, yl, 1); if (thick) put(m, x, yl + 1, 1); }
+      for (let x = 26; x <= 32; x++) { const yr = Y(15) - up + Math.round(dh * (32 - x) / 6); put(m, x, yr, 1); if (thick) put(m, x, yr + 1, 1); }
+      const ey = Y(20.5), spread = r > 0.6 ? 1 : 0, rr = opt.sleepy ? 1 : r;
+      [19, 29].forEach((ex, idx) => {
+        ell(m, ex, ey, 3.2, 3.2, 5);
+        const pxs = ex + (idx === 0 ? -spread : spread);
+        ell(m, pxs, ey, 2, 2, 6);
+        if (rr < 0.35) { put(m, Math.floor(pxs - 1), Math.floor(ey - 1), 5); put(m, Math.floor(pxs + 0.5), Math.floor(ey + 0.5), 5); }
+        else if (rr < 0.7) put(m, Math.floor(pxs - 1), Math.floor(ey - 1), 5);
+        if (rr > 0.35) {
+          const lid = (rr - 0.35) / 0.65 * 0.55, edge = ey - 3.2 + lid * 6.4;
+          for (let y = Math.floor(ey - 4); y <= Math.ceil(ey + 4); y++) for (let x = Math.floor(ex - 4); x <= Math.ceil(ex + 4); x++) {
+            const dx = x + 0.5 - ex, dy = y + 0.5 - ey;
+            if (dx * dx + dy * dy <= 3.2 * 3.2) { if (y + 0.5 < edge) put(m, x, y, 2); else if (y + 0.5 < edge + 1) put(m, x, y, 1); }
+          }
+        }
+      });
+      const out = mk();
+      for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+        if (m[y][x]) out[y][x] = m[y][x];
+        else if ((y > 0 && m[y - 1][x]) || (y < H - 1 && m[y + 1][x]) || (x > 0 && m[y][x - 1]) || (x < W - 1 && m[y][x + 1])) out[y][x] = 1;
+      }
+      return { grid: out, pal: PAL };
+    }
+
+
+    const NEUTRAL = { L: 0, S: 0, K: 0, P: 0, U: 0, O: 0 };
+    const arr = (v) => (Array.isArray(v) ? v : v && typeof v === 'object' ? Object.values(v) : []);
+    function scoresFromResult(r) {
+      if (!r) return null;
+      const by = {};
+      arr(r.dimensions).forEach((d) => { if (d && d.key) by[d.key] = clamp(d.score, 0, 10); });
+      const pol = r.political || {};
+      return { political: !!pol.applicable, L: pol.applicable ? clamp(pol.score, -6, 6) : 0, S: by.sensationalism || 0, K: by.loaded_language || 0,
+               P: by.ad_hominem || 0, U: by.unsupported_claims || 0, O: by.one_sided || 0 };
+    }
+
+    const mean = (xs) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0);
+
+    // Average a person's whole history into one bear.
+    //  - L is averaged over political videos only (applicable === true). Non-political videos have no lean.
+    //  - S, K, P, U, O are averaged over every analyzed video.
+    //  - meanAbsLean tells you how far from center the videos were on average. A viewer who watches strong-left and strong-right
+    //    videos has L near 0 (looks "balanced") but a large meanAbsLean, so show both numbers, not only the bear.
+    function aggregate(list) {
+      const rows = (list || []).filter(Boolean);
+      const pol = rows.filter((r) => r.political !== false);
+      const leans = pol.map((r) => r.L);
+      const out = { n: rows.length, nPolitical: pol.length,
+        L: Math.round(mean(leans) * 10) / 10, meanAbsLean: Math.round(mean(leans.map(Math.abs)) * 10) / 10,
+        S: mean(rows.map((r) => r.S)), K: mean(rows.map((r) => r.K)), P: mean(rows.map((r) => r.P)),
+        U: mean(rows.map((r) => r.U)), O: mean(rows.map((r) => r.O)) };
+      const m = leans.length ? out.L : 0;
+      out.spread = Math.round(Math.sqrt(mean(leans.map((x) => (x - m) ** 2))) * 10) / 10;   // how mixed the lean of the videos is
+      return out;
+    }
+
+    function draw(canvas, v, opt) {
+      const ctx = canvas.getContext('2d'), { grid, pal } = compose(v, opt);
+      canvas.width = W; canvas.height = H;
+      ctx.clearRect(0, 0, W, H);
+      for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { const c = grid[y][x]; if (c) { ctx.fillStyle = pal[c]; ctx.fillRect(x, y, 1, 1); } }
+    }
+    return { compose, draw, scoresFromResult, aggregate, W, H };
+  })();
+  // END bear.js
+  const clamp = (v, a, b) => Math.min(b, Math.max(a, Number(v) || 0));
 
   // ---------- reading the analysis ----------
   const NEUTRAL = { L: 0, S: 0, K: 0, P: 0, U: 0, O: 0 };
@@ -98,14 +155,11 @@
     ['unsupported_claims', 'U', 'Unsupported claims', 'Assertions without evidence or sourcing'],
     ['ad_hominem', 'P', 'Personal attacks', 'Targets people rather than their arguments'],
   ];
+  // The bear's scores (lib/bear.js) plus the overall Slant score, used by the cache and the screen-reader label.
   function scoresFromResult(r) {
-    if (!r) return null;
-    const by = {};
-    arr(r.dimensions).forEach((d) => { if (d && d.key) by[d.key] = clamp(d.score, 0, 10); });
-    const pol = r.political || {};
-    return { L: pol.applicable ? clamp(pol.score, -6, 6) : 0, S: by.sensationalism || 0, K: by.loaded_language || 0,
-             P: by.ad_hominem || 0, U: by.unsupported_claims || 0, O: by.one_sided || 0,
-             political: !!pol.applicable, overall: clamp(r.overall, 0, 10) };
+    const sc = Bear.scoresFromResult(r);
+    if (sc) sc.overall = clamp(r.overall, 0, 10);
+    return sc;
   }
   // Same thresholds as the app (AllSides bands on the score rounded to 0.1; Slant score words).
   function bearLeanLabel(score) {
@@ -116,22 +170,12 @@
     v = Number(v) || 0;
     return v < 2.5 ? 'Minimal' : v < 4.5 ? 'Mild' : v < 6.5 ? 'Moderate' : v < 8.5 ? 'Strong' : 'Extreme';
   }
-  const str = (v, n) => String(v == null ? '' : v).slice(0, n);
-  // Everything the card shows, taken from a finished job. Kept small: it is also cached per video.
+  // What the card needs beyond the scores, taken from a finished job. Kept small: it is also cached per video.
   function detailsFromJob(job) {
     const payload = job.result || {};
-    const rec = payload.record || {};
-    const r = rec.result || {};
-    const by = {};
-    arr(r.dimensions).forEach((d) => { if (d && d.key) by[d.key] = d; });
-    const a = job.analysis || {};
     return {
-      headline: str(r.headline, 160),
-      dims: DIMS.map(([key]) => ({ key, score: clamp(by[key] && by[key].score, 0, 10), why: str(by[key] && by[key].explanation, 420) })),
       url: typeof payload.manaUrl === 'string' && /^https:\/\/www\.mana\.space\//.test(payload.manaUrl) ? payload.manaUrl : '',
       simulated: !!(payload.simulated || job.simulated),
-      kind: job.simulated ? 'simulated' : job.cached ? 'saved' : job.mode === 'fresh' ? 'fresh' : 'new',
-      at: a.updatedAt || a.createdAt || job.finishedAt || Date.now(),
     };
   }
   // Watch pages and Shorts (the same 11-character video id in both).
@@ -168,86 +212,77 @@
   };
 
   // ---------- UI (closed shadow DOM so YouTube's CSS and scripts cannot touch it) ----------
-  // One column, one centre line: the bear, its label and the card share the same axis and width.
+  // One column, one centre line: the bear, its speech bubble and the card share the same axis and width.
   const host = document.createElement('div');
   host.id = 'slant-bear-host';
   host.style.cssText = 'position:fixed;top:64px;right:16px;z-index:2147483000;display:none;pointer-events:none;';
   const root = host.attachShadow({ mode: 'closed' });
   const style = document.createElement('style');
+  const MONO = 'ui-monospace,"Cascadia Mono",Consolas,"Courier New",monospace';
+  const SANS = 'system-ui,-apple-system,"Segoe UI",Roboto,sans-serif';
   style.textContent = [
     ':host{all:initial}',
     '*{box-sizing:border-box}',
-    '.col{width:336px;display:flex;flex-direction:column;align-items:center;gap:8px;font:400 14px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;color:#1c1830;-webkit-font-smoothing:antialiased}',
+    '.col{width:min(380px,calc(100vw - 32px));display:flex;flex-direction:column;align-items:center;gap:14px;font:500 18px/1.4 ' + SANS + ';color:#1c1830;-webkit-font-smoothing:antialiased}',
     '.col>*{pointer-events:auto}',
-    '.wrap{display:flex;flex-direction:column;align-items:center;gap:8px;cursor:pointer;background:none;border:0;padding:0;font:inherit;color:inherit}',
+    '.wrap{display:flex;flex-direction:column;align-items:center;gap:24px;cursor:pointer;background:none;border:0;padding:0;font:inherit;color:inherit}',
     'canvas{width:120px;height:155px;image-rendering:pixelated;filter:drop-shadow(0 6px 10px rgba(30,20,60,.35));transition:transform .15s}',
     '.wrap:hover canvas,.wrap:focus-visible canvas{transform:translateY(-3px)}',
-    '.wrap:focus-visible{outline:3px solid #7b5cc8;outline-offset:4px;border-radius:14px}',
-    // the label under the bear
-    '.tip{display:flex;flex-direction:column;align-items:center;gap:1px;background:#fff;border:1px solid #ddd6c8;border-radius:14px;padding:7px 16px;box-shadow:0 2px 10px rgba(30,20,60,.16);text-align:center;max-width:336px}',
-    '.tip[hidden]{display:none}',
-    '.t1{font-weight:650;font-size:15px;white-space:nowrap}.t2{font-size:12.5px;color:#5b5568;white-space:nowrap}.t2:empty{display:none}',
-    // the card
-    '.card{width:336px;background:#fff;border:1px solid #ddd6c8;border-radius:18px;box-shadow:0 10px 30px rgba(30,20,60,.18),0 1px 3px rgba(30,20,60,.08);max-height:calc(100vh - 64px - 155px - 24px);overflow-y:auto;overscroll-behavior:contain}',
+    '.wrap:focus-visible{outline:3px solid #7b5cc8;outline-offset:6px;border-radius:12px}',
+    // the pixel speech bubble under the bear (pixel border drawn with box-shadows, stepped arrow pointing up at the bear)
+    '.tip{position:relative;display:flex;flex-direction:column;align-items:center;gap:4px;font:700 22px/1.3 ' + MONO + ';letter-spacing:.01em;color:#1c1830;background:#fff;padding:12px 20px;max-width:min(340px,calc(100vw - 56px));text-align:center;' +
+      'box-shadow:0 -4px 0 0 #1c1830,0 4px 0 0 #1c1830,-4px 0 0 0 #1c1830,4px 0 0 0 #1c1830,4px 8px 0 0 rgba(0,0,0,.35),8px 4px 0 0 rgba(0,0,0,.35)}',
+    '.ar-o{position:absolute;left:50%;top:-20px;margin-left:-16px;width:32px;height:16px;background:#1c1830;' +
+      'clip-path:polygon(12px 0,20px 0,20px 4px,24px 4px,24px 8px,28px 8px,28px 12px,32px 12px,32px 16px,0 16px,0 12px,4px 12px,4px 8px,8px 8px,8px 4px,12px 4px)}',
+    '.ar-i{position:absolute;left:50%;top:-16px;margin-left:-12px;width:24px;height:16px;background:#fff;' +
+      'clip-path:polygon(8px 0,16px 0,16px 4px,20px 4px,20px 8px,24px 8px,24px 16px,0 16px,0 8px,4px 8px,4px 4px,8px 4px)}',
+    '.t2{font-weight:600;font-size:18px;color:#3d3750}.t2:empty{display:none}',
+    // the card: scrolling body (scrollbar hidden) and a fixed footer with the buttons
+    '.card{width:100%;background:#fff;border:2px solid #d9d3c5;border-radius:20px;box-shadow:0 4px 14px rgba(30,20,60,.25);display:flex;flex-direction:column;overflow:hidden;max-height:calc(100vh - 380px)}',
     '.card[hidden]{display:none}',
-    '.sec{padding:16px 20px}.sec+.sec{border-top:1px solid #eee9de}',
-    '.hl{font-weight:650;font-size:15.5px;line-height:1.35;text-wrap:pretty}',
-    '.eyebrow{font-size:11.5px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:#6b6478}',
-    '.row{display:flex;align-items:baseline;justify-content:space-between;gap:12px}',
-    '.big{font-size:21px;font-weight:700;letter-spacing:-.01em;line-height:1.2;margin-top:4px}',
-    '.aside{font-size:13px;color:#5b5568;font-variant-numeric:tabular-nums;white-space:nowrap}',
-    '.expl{font-size:13px;color:#4a4458;margin-top:10px;text-wrap:pretty}',
-    // lean spectrum: five AllSides bands, the video's band in full colour
-    '.spec{position:relative;margin-top:16px;padding-top:6px}',
-    '.bands{display:grid;grid-template-columns:3fr 2fr 2fr 2fr 3fr;gap:3px}',
-    '.bands i{height:10px;border-radius:3px;opacity:.28}.bands i.on{opacity:1}',
-    '.bands i:first-child{border-radius:6px 3px 3px 6px}.bands i:last-child{border-radius:3px 6px 6px 3px}',
-    '.pin{position:absolute;top:0;width:18px;height:18px;margin-left:-9px;border-radius:50%;background:#fff;border:3px solid #1c1830;box-shadow:0 1px 3px rgba(0,0,0,.25)}',
-    '.ends{display:flex;justify-content:space-between;margin-top:6px;font-size:12px;color:#5b5568}',
-    '.ends span{flex:1;text-align:center}.ends span:first-child{text-align:left}.ends span:last-child{text-align:right}',
-    // slant score: 0 to 10 with word steps
-    '.track{position:relative;height:10px;border-radius:6px;background:#eee9de;margin-top:14px;overflow:hidden}',
-    '.fill{position:absolute;left:0;top:0;bottom:0;border-radius:6px;background:#1c1830}',
-    '.steps{position:absolute;inset:0;display:grid;grid-template-columns:2.5fr 2fr 2fr 2fr 1.5fr}',
-    '.steps b{border-right:2px solid #fff}.steps b:last-child{border-right:0}',
-    // signals
-    '.sigs{margin-top:8px}',
-    '.sig{display:grid;grid-template-columns:1fr auto 22px;align-items:center;gap:10px;width:100%;padding:7px 0;background:none;border:0;font:inherit;color:inherit;cursor:pointer;text-align:left}',
-    '.sig:focus-visible{outline:2px solid #7b5cc8;outline-offset:2px;border-radius:6px}',
-    '.sig .nm{font-size:14px;white-space:nowrap}.sig .nm:after{content:"›";color:#9a93a8;display:inline-block;margin-left:6px;transition:transform .15s}.sig[aria-expanded="true"] .nm:after{transform:rotate(90deg)}',
-    '.meter{display:flex;gap:2px}.meter i{width:7px;height:8px;border-radius:2px;background:#e6e1d6}.meter i.on{background:#1c1830}',
-    '.num{text-align:right;font-variant-numeric:tabular-nums;font-weight:600;font-size:13.5px}',
-    '.why{font-size:13px;color:#4a4458;padding:0 0 8px;text-wrap:pretty}.why .hint{color:#6b6478;font-style:italic}',
-    '.scale-note{font-size:12px;color:#6b6478;margin-top:2px}',
+    '.body{overflow-y:auto;overscroll-behavior:contain;padding:16px 20px 8px;scrollbar-width:none;-ms-overflow-style:none;min-height:0}',
+    '.body::-webkit-scrollbar{display:none;width:0;height:0}',
+    '.foot{flex:none;padding:14px 20px 16px;border-top:2px solid #e6e1d6}',
+    '.lbl{font-weight:700;font-size:16px;letter-spacing:.06em;text-transform:uppercase;color:#3d3750}',
+    '.lean{display:flex;align-items:center;gap:14px;margin:6px 0 4px}',
+    '.lnum{font:600 56px/1 Georgia,"Source Serif 4",serif;font-variant-numeric:tabular-nums}',
+    '.pill{font-weight:700;font-size:22px;border-radius:999px;padding:5px 18px;border:2px solid currentColor;background:#fff;white-space:nowrap}',
+    '.conf{margin-left:auto;font-size:16px;color:#3d3750;text-align:right;white-space:pre-line}',
+    '.np{font-size:26px;font-weight:700;margin:6px 0 4px}',
+    '.scale{position:relative;margin-top:18px;height:20px;display:flex;gap:2px}',
+    '.scale i{display:block;height:100%}.scale i:first-child{border-radius:10px 0 0 10px}.scale i:nth-child(5){border-radius:0 10px 10px 0}',
+    '.mk{position:absolute;top:-8px;width:6px;height:36px;margin-left:-3px;background:#1c1830;border-radius:3px;box-shadow:0 0 0 2px #fff}',
+    '.names{display:flex;gap:2px;margin-top:8px;font-size:16px;line-height:1.2;color:#3d3750;text-align:center}.names span{white-space:pre-line}.names .act{font-weight:700;color:#1c1830}',
+    '.sep{height:2px;background:#e6e1d6;margin:16px -20px}',
+    '.sig{padding:5px 0}.sg1{display:flex;justify-content:space-between;align-items:baseline;gap:10px;font-size:22px;font-weight:600}.sg1 em{font-style:normal;font-weight:700;white-space:nowrap}',
+    '.bar{display:flex;gap:3px;margin-top:6px}.bar i{flex:1;height:14px;border-radius:3px;background:#e6e1d6}.bar i.on{background:#1c1830}',
+    '.big{font-size:26px;font-weight:700;margin-top:4px;line-height:1.25}.err-msg{font-size:18px;color:#3d3750;margin-top:6px;text-wrap:pretty}',
+    '.expl{font-size:16px;color:#4a4458;margin-top:8px;text-wrap:pretty}',
     // actions: always a pair of equal buttons, or one full-width button
-    '.acts{display:grid;grid-template-columns:1fr 1fr;gap:10px}.acts.one{grid-template-columns:1fr}',
-    '.btn{display:flex;align-items:center;justify-content:center;gap:6px;height:42px;padding:0 14px;border-radius:999px;font:600 14px/1 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;cursor:pointer;text-decoration:none;border:1px solid #d3cbbb;background:#fff;color:#1c1830;white-space:nowrap}',
-    '.btn.primary{background:#1c1830;border-color:#1c1830;color:#fff}',
-    '.btn:hover{filter:brightness(.97)}.btn.primary:hover{filter:brightness(1.15)}',
+    '.acts{display:grid;grid-template-columns:1fr 1fr;gap:12px}.acts.one{grid-template-columns:1fr}',
+    '.btn{display:flex;align-items:center;justify-content:center;height:52px;padding:0 12px;border-radius:999px;font:700 20px/1 ' + SANS + ';cursor:pointer;text-decoration:none;border:2px solid #1c1830;background:#fff;color:#1c1830;white-space:nowrap}',
+    '.btn.primary{background:#1c1830;color:#fff}',
+    '.btn:hover{filter:brightness(.96)}.btn.primary:hover{filter:brightness(1.2)}',
     '.btn:focus-visible{outline:3px solid #7b5cc8;outline-offset:2px}',
-    '.foot{margin-top:12px;text-align:center;font-size:12px;color:#6b6478}',
-    '.lnk{background:none;border:0;padding:0;font:inherit;color:#4a3a8c;text-decoration:underline;text-underline-offset:2px;cursor:pointer}',
-    '.lnk:focus-visible{outline:2px solid #7b5cc8;outline-offset:2px;border-radius:3px}',
-    '.confirm{margin-top:12px;padding:12px;border-radius:12px;background:#f6f3ec;font-size:13px;color:#4a4458;text-align:left}',
-    '.confirm .acts{margin-top:10px}.confirm .btn{height:36px;font-size:13px}',
-    '.err-msg{font-size:13.5px;color:#4a4458;margin-top:6px;text-wrap:pretty}',
-    '@media (prefers-reduced-motion: reduce){canvas{transition:none}.wrap:hover canvas{transform:none}.sig .nm:after{transition:none}}',
+    '.note{margin-top:10px;text-align:center;font-size:15px;color:#6b6478}',
+    '@media (prefers-reduced-motion: reduce){canvas{transition:none}.wrap:hover canvas,.wrap:focus-visible canvas{transform:none}}',
   ].join('');
   const col = document.createElement('div'); col.className = 'col';
   const btn = document.createElement('button');
   btn.className = 'wrap'; btn.type = 'button';
-  const cv = document.createElement('canvas'); cv.width = 48; cv.height = 62;
+  const cv = document.createElement('canvas'); cv.width = Bear.W; cv.height = Bear.H;
   const tip = document.createElement('div'); tip.className = 'tip';
+  const arO = document.createElement('span'), arI = document.createElement('span');
+  arO.className = 'ar-o'; arI.className = 'ar-i'; arO.setAttribute('aria-hidden', 'true'); arI.setAttribute('aria-hidden', 'true');
   const tipMain = document.createElement('span'), tipSub = document.createElement('span');
   tipMain.className = 't1'; tipSub.className = 't2';
-  tip.append(tipMain, tipSub); btn.append(cv, tip);
+  tip.append(arO, arI, tipMain, tipSub); btn.append(cv, tip);
   const card = document.createElement('div'); card.className = 'card'; card.hidden = true; card.id = 'slant-details';
   card.setAttribute('role', 'region'); card.setAttribute('aria-label', 'Slant analysis');
   btn.setAttribute('aria-controls', 'slant-details');
   col.append(btn, card);
   root.append(style, col);
-  const ctx = cv.getContext('2d');
-  let cur = { kind: 'idle' }, timer = 0, lastFrame = '', pendingUntil = 0, expanded = false, openSig = null, confirmAgain = false, connOk = null;
+  let cur = { kind: 'idle' }, timer = 0, lastFrame = '', pendingUntil = 0, expanded = false, connOk = null;
 
   // ---------- tiny DOM helpers (text only) ----------
   function el(tag, cls, text, attrs) {
@@ -274,142 +309,106 @@
     return d;
   }
   const fmtLean = (s) => (s === 0 ? '0' : (s > 0 ? '+' : '−') + Math.abs(s));
-  const fmtDay = (ms) => new Date(ms).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
-  const LEAN_INK = { Left: '#2452d0', 'Lean Left': '#2f5ea8', Center: '#4a3a8c', 'Lean Right': '#b23a2f', Right: '#c42c2c' };
-  const BAND_COLORS = ['rgb(58,112,246)', 'rgb(138,166,242)', 'rgb(183,156,237)', 'rgb(240,154,154)', 'rgb(238,74,74)'];
-  const LEAN_SENTENCE = { Left: 'Leans clearly to the left.', 'Lean Left': 'Leans somewhat to the left.', Center: 'Close to the political center.',
-                          'Lean Right': 'Leans somewhat to the right.', Right: 'Leans clearly to the right.' };
-  const BAND_INDEX = { Left: 0, 'Lean Left': 1, Center: 2, 'Lean Right': 3, Right: 4 };
+  const LEAN_INK = { Left: '#2f5ea8', 'Lean Left': '#2f5ea8', Center: '#1c1830', 'Lean Right': '#b23a2f', Right: '#b23a2f' };
+  // The five AllSides bands: width in scale points, colour, name.
+  const BANDS = [[3, '#3b6fd4', 'Left'], [2, '#a9bfee', 'Lean Left'], [2, '#b8b8c0', 'Center'], [2, '#eaa9a3', 'Lean Right'], [3, '#d64545', 'Right']];
 
   // ---------- the card ----------
-  function leanSection(sc) {
-    const s = el('div', 'sec');
-    s.append(el('div', 'eyebrow', 'Political lean'));
+  function leanBlock(sc, body) {
+    body.append(el('div', 'lbl', 'Political lean'));
     if (!sc.political) {
-      s.append(el('div', 'big', 'Not political'), el('div', 'expl', 'This video isn’t about politics or social issues, so there’s no left or right lean to place.'));
-      return s;
+      body.append(el('div', 'np', 'Not political'), el('div', 'expl', 'This video isn’t about politics, so there’s no left or right lean to place.'));
+      return;
     }
     const lean = Math.round(clamp(sc.L, -6, 6) * 10) / 10, band = bearLeanLabel(lean);
-    const top = el('div', 'row');
-    const word = el('div', 'big', band); word.style.color = LEAN_INK[band];
-    top.append(word, el('span', 'aside', fmtLean(lean) + ' of ±6'));
-    s.append(top, el('div', 'expl', LEAN_SENTENCE[band]));
-    const spec = el('div', 'spec', null, { role: 'img', 'aria-label': 'Lean ' + fmtLean(lean) + ' on a scale from −6 (left) to +6 (right): ' + band });
-    const bands = el('div', 'bands');
-    BAND_COLORS.forEach((c, i) => { const b = el('i', i === BAND_INDEX[band] ? 'on' : ''); b.style.background = c; bands.append(b); });
-    const pin = el('div', 'pin'); pin.style.left = ((lean + 6) / 12 * 100) + '%';
-    spec.append(bands, pin);
-    const ends = el('div', 'ends', null, { 'aria-hidden': 'true' });
-    ends.append(el('span', null, '← Left'), el('span', null, 'Center'), el('span', null, 'Right →'));
-    s.append(spec, ends, el('div', 'scale-note', 'Scale from −6 to +6 and its five bands follow the AllSides Media Bias Meter.'));
-    return s;
-  }
-  function slantSection(sc) {
-    const s = el('div', 'sec');
-    const v = clamp(sc.overall, 0, 10), word = bearScoreWord(v);
-    s.append(el('div', 'eyebrow', 'How slanted'));
-    const top = el('div', 'row');
-    top.append(el('div', 'big', word), el('span', 'aside', (Math.round(v * 10) / 10) + ' out of 10'));
-    const track = el('div', 'track', null, { role: 'img', 'aria-label': 'Slant score ' + (Math.round(v * 10) / 10) + ' out of 10: ' + word });
-    const fill = el('div', 'fill'); fill.style.width = (v * 10) + '%';
-    const steps = el('div', 'steps'); for (let i = 0; i < 5; i++) steps.append(el('b'));
-    track.append(fill, steps);
-    const ends = el('div', 'ends', null, { 'aria-hidden': 'true' });
-    ends.append(el('span', null, '0 · Fair and balanced'), el('span', null, '10 · Extreme'));
-    s.append(top, track, ends,
-      el('div', 'expl', 'How far the video departs from fair, balanced treatment, toward either side. It rates how the case is made, not whether it’s true.'));
-    return s;
-  }
-  function signalsSection(d) {
-    const s = el('div', 'sec');
-    const top = el('div', 'row'); top.append(el('div', 'eyebrow', 'What drives the score'), el('span', 'aside', '0 to 10'));
-    const list = el('div', 'sigs');
-    d.dims.forEach((dm, i) => {
-      const [, , name, hint] = DIMS[i];
-      const n = Math.round(clamp(dm.score, 0, 10)), open = openSig === dm.key;
-      const row = el('button', 'sig', null, { type: 'button', 'aria-expanded': String(open), 'data-dim': dm.key });
-      const meter = el('span', 'meter', null, { 'aria-hidden': 'true' });
-      for (let k = 0; k < 10; k++) meter.append(el('i', k < n ? 'on' : ''));
-      row.append(el('span', 'nm', name), meter, el('span', 'num', n));
-      row.setAttribute('aria-label', name + ', ' + n + ' out of 10');
-      row.addEventListener('click', (e) => { e.stopPropagation(); openSig = open ? null : dm.key; renderCard(); });
-      list.append(row);
-      if (open) { const w = el('div', 'why'); w.append(el('span', 'hint', hint + '. ')); if (dm.why) w.append(document.createTextNode(dm.why)); list.append(w); }
-    });
-    s.append(top, list);
-    return s;
+    const row = el('div', 'lean');
+    const pill = el('span', 'pill', band); pill.style.color = LEAN_INK[band] || '#1c1830';
+    row.append(el('span', 'lnum', fmtLean(lean)), pill, el('span', 'conf', 'AllSides scale\n−6 to +6'));
+    const scale = el('div', 'scale', null, { role: 'img', 'aria-label': 'Lean ' + fmtLean(lean) + ' on the AllSides scale from −6 (left) to +6 (right): ' + band });
+    BANDS.forEach(([w, color]) => { const i = el('i'); i.style.flex = String(w); i.style.background = color; scale.append(i); });
+    const mk = el('div', 'mk'); mk.style.left = ((lean + 6) / 12 * 100) + '%'; scale.append(mk);
+    const names = el('div', 'names', null, { 'aria-hidden': 'true' });
+    BANDS.forEach(([w, , nm]) => { const sp = el('span', nm === band ? 'act' : '', nm.replace(' ', '\n')); sp.style.flex = String(w); names.append(sp); });
+    body.append(row, scale, names);
   }
   function doneCard(st) {
-    const d = st.details || { dims: DIMS.map(([key]) => ({ key, score: 0, why: '' })), url: '', kind: 'saved', at: 0 };
-    if (!d.dims) d.dims = DIMS.map(([key, k]) => ({ key, score: st.scores[k] || 0, why: '' }));
-    const parts = [];
-    if (d.headline) { const h = el('div', 'sec'); h.append(el('div', 'hl', d.headline)); parts.push(h); }
-    parts.push(leanSection(st.scores), slantSection(st.scores), signalsSection(d));
-    const last = el('div', 'sec');
-    last.append(acts(button('Close', '', () => setExpanded(false), 'slant-close'), d.url && !d.simulated ? reportLink(d.url) : null));
-    const foot = el('div', 'foot');
-    const what = { saved: 'Saved analysis', new: 'New analysis', fresh: 'Fresh analysis', simulated: 'Simulated test result · not saved' }[d.kind] || 'Analysis';
-    foot.append(document.createTextNode(what + (d.at && d.kind !== 'simulated' ? ' · ' + fmtDay(d.at) : '') + ' · '));
-    const again = el('button', 'lnk', 'Analyze again', { type: 'button', id: 'slant-again' });
-    again.addEventListener('click', (e) => { e.stopPropagation(); confirmAgain = true; renderCard(); });
-    if (!confirmAgain) foot.append(again); else foot.lastChild.textContent = foot.lastChild.textContent.replace(/ · $/, '');
-    last.append(foot);
-    if (confirmAgain) {
-      const c = el('div', 'confirm', 'Run a fresh analysis of this video? It replaces the saved result in your Slant history and uses Mana credits.');
-      c.append(acts(button('Cancel', '', () => { confirmAgain = false; renderCard(); }), button('Run again', 'primary', () => { confirmAgain = false; analyze('fresh'); }, 'slant-confirm-again')));
-      last.append(c);
-    }
-    parts.push(last);
-    return parts;
+    const sc = st.scores, d = st.details || {};
+    const body = el('div', 'body'), foot = el('div', 'foot');
+    leanBlock(sc, body);
+    body.append(el('div', 'sep'), el('div', 'lbl', 'Other signals'));
+    DIMS.forEach(([key, k, name]) => {
+      const n = Math.round(clamp(sc[k], 0, 10));
+      const row = el('div', 'sig', null, { 'data-dim': key, role: 'img', 'aria-label': name + ', ' + n + ' out of 10' });
+      const l1 = el('div', 'sg1'); l1.append(el('span', null, name), el('em', null, n + ' / 10'));
+      const bar = el('div', 'bar', null, { 'aria-hidden': 'true' });
+      for (let i = 0; i < 10; i++) bar.append(el('i', i < n ? 'on' : ''));
+      row.append(l1, bar); body.append(row);
+    });
+    foot.append(acts(button('Close', '', () => setExpanded(false), 'slant-close'), d.url && !d.simulated ? reportLink(d.url) : null));
+    if (d.simulated) foot.append(el('div', 'note', 'Simulated test result · not saved'));
+    return [body, foot];
   }
   function failedCard(st) {
     const e = st.error || {};
-    const s = el('div', 'sec');
-    s.append(el('div', 'eyebrow', 'Not analyzed'), el('div', 'big', ERR_TITLE[e.code] || 'Something went wrong'),
+    const body = el('div', 'body'), foot = el('div', 'foot');
+    body.append(el('div', 'lbl', 'Not analyzed'), el('div', 'big', ERR_TITLE[e.code] || 'Something went wrong'),
       el('div', 'err-msg', e.message || 'Try again in a moment.'));
-    if (e.code === 'insufficient_credits') s.append(el('div', 'expl', 'Slant runs on its owner’s Mana credits. Saved analyses still open.'));
-    const last = el('div', 'sec');
-    last.append(acts(button('Close', '', () => setExpanded(false), 'slant-close'), e.retryable ? button('Try again', 'primary', () => analyze('retry'), 'slant-retry') : null));
-    return [s, last];
+    if (e.code === 'insufficient_credits') body.append(el('div', 'expl', 'Slant runs on its owner’s Mana credits. Saved analyses still open.'));
+    foot.append(acts(button('Close', '', () => setExpanded(false), 'slant-close'), e.retryable ? button('Try again', 'primary', () => analyze('retry'), 'slant-retry') : null));
+    return [body, foot];
   }
+  // Keep the card inside the window: it ends 16 px above the bottom edge and its body scrolls.
+  function fitCard() {
+    if (card.hidden) return;
+    const top = card.getBoundingClientRect().top;
+    card.style.maxHeight = Math.max(160, window.innerHeight - top - 16) + 'px';
+  }
+  window.addEventListener('resize', fitCard);
   function renderCard() {
     const canOpen = cur.kind === 'done' || cur.kind === 'failed';
     card.hidden = !(expanded && canOpen);
-    tip.hidden = !card.hidden;                 // the card replaces the label, so only one box sits under the bear
     btn.setAttribute('aria-expanded', String(!card.hidden));
     if (card.hidden) return;
-    const keepScroll = card.scrollTop;
+    const oldBody = card.querySelector('.body');
+    const keepScroll = oldBody ? oldBody.scrollTop : 0;
     const focused = root.activeElement;                  // keep keyboard focus on the same control across a redraw
-    const focusKey = focused && card.contains(focused) ? (focused.id || (focused.dataset && focused.dataset.dim) || '') : '';
+    const focusKey = focused && card.contains(focused) ? focused.id || '' : '';
     card.textContent = '';
     card.append(...(cur.kind === 'done' ? doneCard(cur) : failedCard(cur)));
-    card.scrollTop = keepScroll;
-    if (focusKey) {
-      const again = card.querySelector('#' + CSS.escape(focusKey)) || card.querySelector('[data-dim="' + CSS.escape(focusKey) + '"]');
-      if (again) again.focus({ preventScroll: true });
-    }
+    card.querySelector('.body').scrollTop = keepScroll;
+    fitCard();
+    if (focusKey) { const again = card.querySelector('#' + CSS.escape(focusKey)); if (again) again.focus({ preventScroll: true }); }
   }
   function setExpanded(on) {
-    expanded = on; if (!on) { openSig = null; confirmAgain = false; }
+    expanded = on;
+    btn.setAttribute('aria-label', ariaLabel(cur));
     lastFrame = ''; paint(); renderCard();
     if (!on) safe(() => btn.focus({ preventScroll: true }));
   }
 
-  // ---------- the label under the bear ----------
+  // ---------- the speech bubble under the bear ----------
   function texts(st, ts) {
-    if (st.kind === 'done') {
-      const sc = st.scores, lean = sc.political !== false ? bearLeanLabel(sc.L) : 'Not political';
-      return { main: lean + ' · ' + bearScoreWord(sc.overall) + ' slant', color: LEAN_INK[lean] || '#1c1830', sub: 'Tap for details' };
-    }
+    if (st.kind === 'done') return { main: expanded ? 'Tap me again to hide' : 'Tap me for results', sub: '' };
     if (st.kind === 'analyzing') {
       const dots = '.'.repeat(1 + (Math.floor(ts / 400) % 3));
       const secs = st.since ? Math.max(0, Math.round((Date.now() - (st.skew || 0) - st.since) / 1000)) : 0;
-      return { main: 'Analyzing' + dots, color: '#1c1830', sub: (st.step || 'Starting') + (secs ? ' · ' + secs + ' s' : '') };
+      return { main: 'Analyzing' + dots, sub: (st.step || 'Starting') + (secs ? ' · ' + secs + ' s' : '') };
     }
-    if (st.kind === 'failed') return { main: 'Couldn’t analyze', color: '#1c1830', sub: 'Tap for details' };
-    if (st.kind === 'setup') return st.waiting ? { main: 'Finish setup', color: '#1c1830', sub: 'in the Slant tab that just opened' }
-      : { main: st.reason === 'expired' ? 'Reconnect Slant' : 'Set up Slant', color: '#1c1830', sub: 'Tap to connect this browser' };
-    return { main: 'Tap to analyze', color: '#1c1830', sub: 'See how slanted this video is' };
+    if (st.kind === 'failed') return { main: 'Couldn’t analyze', sub: expanded ? 'Tap me again to hide' : 'Tap me for details' };
+    if (st.kind === 'setup') return st.waiting ? { main: 'Finish setup', sub: 'in the Slant tab that just opened' }
+      : { main: st.reason === 'expired' ? 'Reconnect Slant' : 'Set up Slant', sub: 'Tap to connect this browser' };
+    return { main: 'Tap me to analyze', sub: '' };
+  }
+  // What a screen reader hears: the result in words, since the bubble no longer states it.
+  function ariaLabel(st) {
+    if (st.kind === 'done') {
+      const sc = st.scores, lean = sc.political !== false ? bearLeanLabel(sc.L) : 'Not political';
+      return 'Slant: ' + lean + ', ' + bearScoreWord(sc.overall) + ' slant. ' + (expanded ? 'Tap to hide details' : 'Tap for details');
+    }
+    const tx = texts(st, 0);
+    if (st.kind === 'analyzing') return 'Slant: Analyzing. ' + tx.sub;
+    if (st.kind === 'failed') return 'Slant: Couldn’t analyze. ' + (expanded ? 'Tap to hide details' : 'Tap for details');
+    return 'Slant: ' + tx.main + (tx.sub ? '. ' + tx.sub : '');
   }
 
   function paint() {
@@ -420,21 +419,15 @@
     const frame = cur.kind + '|' + bob + '|' + tx.main + '|' + tx.sub + '|' + JSON.stringify(cur.scores || null);
     if (frame === lastFrame) return;                     // nothing visible changed: skip the redraw
     lastFrame = frame;
-    const v = cur.kind === 'done' ? cur.scores : NEUTRAL;
-    const { grid, pal } = compose(v, { sleepy: cur.kind === 'failed', oy: bob });
-    ctx.clearRect(0, 0, W, H);
-    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { const c = grid[y][x]; if (c) { ctx.fillStyle = pal[c]; ctx.fillRect(x, y, 1, 1); } }
-    tipMain.textContent = tx.main; tipMain.style.color = tx.color; tipSub.textContent = tx.sub;
+    Bear.draw(cv, cur.kind === 'done' ? cur.scores : NEUTRAL, { sleepy: cur.kind === 'failed', oy: bob });
+    tipMain.textContent = tx.main; tipSub.textContent = tx.sub;
+    if (!card.hidden) fitCard();                         // the bubble can change height (step text wraps)
   }
   function setState(next) {
-    const sameDone = cur.kind === 'done' && next.kind === 'done';
     cur = next;
-    const tx = texts(next, 0);
     const opens = next.kind === 'done' || next.kind === 'failed';
-    btn.setAttribute('aria-label', 'Slant: ' + (next.kind === 'analyzing' ? 'Analyzing' : tx.main) + '. ' +
-      (opens ? (expanded ? 'Tap to hide details' : 'Tap for details') : tx.sub));
     if (!opens) expanded = false;
-    if (!sameDone) confirmAgain = false;
+    btn.setAttribute('aria-label', ariaLabel(next));
     lastFrame = '';
     paint();
     renderCard();

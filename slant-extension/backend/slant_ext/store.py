@@ -36,7 +36,11 @@ class Store:
             self.db.execute("PRAGMA busy_timeout=5000")
             self.db.executescript(SCHEMA)
             # Additive migrations: which Mana person a browser belongs to (feed history), and whether a job was recorded.
-            for table, col in (("credentials", "uid TEXT"), ("pairing_codes", "uid TEXT"), ("jobs", "fed INTEGER NOT NULL DEFAULT 0")):
+            # email: the verified address of the Mana account that created the pairing code (shown to the Slant team only).
+            for table, col in (("credentials", "uid TEXT"), ("pairing_codes", "uid TEXT"), ("jobs", "fed INTEGER NOT NULL DEFAULT 0"),
+                               ("credentials", "email TEXT"), ("pairing_codes", "email TEXT"),
+                               ("jobs", "public INTEGER NOT NULL DEFAULT 0"),   # 1 = paid job from a non-team account
+                               ("jobs", "target TEXT")):   # fresh mode: the record to re-analyze (website Re-analyze)
                 cols = [r[1] for r in self.db.execute(f"PRAGMA table_info({table})").fetchall()]
                 if col.split()[0] not in cols:
                     self.db.execute(f"ALTER TABLE {table} ADD COLUMN {col}")
@@ -107,13 +111,27 @@ class Store:
             args = (cred_id,)
         return self.one(sql, args)["n"]
 
-    def paid_since(self, since_ms, cred_id=None):
-        sql = "SELECT COUNT(*) n FROM jobs WHERE paid=1 AND created_at>=?"
+    def paid_since(self, since_ms, cred_id=None, public_only=False):
+        sql = "SELECT COUNT(*) n FROM jobs WHERE paid=1 AND created_at>=?" + (" AND public=1" if public_only else "")
         args = [since_ms]
         if cred_id:
             sql += " AND credential_id=?"
             args.append(cred_id)
         return self.one(sql, args)["n"]
+
+    # ---- per Mana account (a browser belongs to the account that created its pairing code; revoked browsers still count) ----
+    def active_paid_uid(self, uid):
+        return self.one("SELECT COUNT(*) n FROM jobs j JOIN credentials c ON c.id=j.credential_id "
+                        "WHERE j.paid=1 AND j.state IN ('queued','running') AND c.uid=?", (uid,))["n"]
+
+    def paid_since_uid(self, since_ms, uid):
+        return self.one("SELECT COUNT(*) n FROM jobs j JOIN credentials c ON c.id=j.credential_id "
+                        "WHERE j.paid=1 AND j.created_at>=? AND c.uid=?", (since_ms, uid))["n"]
+
+    def recent_jobs_for_uid(self, uid, limit=8):
+        return [self._decode(r) for r in self.all(
+            "SELECT j.id, j.video_id, j.state, j.title, j.error_code, j.cached, j.simulate, j.timings, j.created_at "
+            "FROM jobs j JOIN credentials c ON c.id=j.credential_id WHERE c.uid=? ORDER BY j.created_at DESC LIMIT ?", (uid, limit))]
 
     def recent_jobs(self, limit=20):
         return [self._decode(r) for r in self.all(

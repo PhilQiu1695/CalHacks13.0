@@ -24,6 +24,7 @@ def files(base, skip_dirs=(), skip_names=()):
 
 def main():
     subprocess.run([sys.executable, os.path.join(ROOT, "scripts", "build_core.py")], check=True)
+    subprocess.run([sys.executable, os.path.join(ROOT, "scripts", "build_bear.py")], check=True)
     m = json.load(open(os.path.join(EXT, "manifest.json")))
     v = m["version"]
     os.makedirs(DIST, exist_ok=True)

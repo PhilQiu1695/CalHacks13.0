@@ -1,5 +1,6 @@
 """Slant's own records, read and written in the app's exact shape so they appear in its Mana history:
-apps/slant/app/analyses/<id> and apps/slant/app/transcripts/<id>/snippets. Feedback (flags) is never touched."""
+apps/slant/app/analyses/<id> and apps/slant/app/transcripts/<id>/snippets. (Slant's Disagree? notes were removed on 2026-10-24;
+new records carry no flags node.)"""
 import threading
 import time
 
@@ -39,8 +40,8 @@ RECORD_KEYS = ("videoId", "url", "title", "author", "language", "source", "model
 
 
 class SlantRecords:
-    def __init__(self, fb, app_path, flag_perms, owner_uid, clock=now_ms, ttl_ms=15000):
-        self.fb, self.app, self.flag_perms, self.owner = fb, app_path, flag_perms, owner_uid
+    def __init__(self, fb, app_path, owner_uid, clock=now_ms, ttl_ms=15000):
+        self.fb, self.app, self.owner = fb, app_path, owner_uid
         self.clock, self.ttl = clock, ttl_ms
         self._cache, self._cache_at = None, 0
         self._lock = threading.Lock()
@@ -78,7 +79,7 @@ class SlantRecords:
         while self.fb.read(f"{self.app}/analyses/{rid}/metadata") is not None:
             rid = "v" + str(int(rid[1:]) + 1)
         t = int(rid[1:])
-        record = {**fields, **(extra or {}), "flags": {"metadata": {"permissions": dict(self.flag_perms)}},
+        record = {**fields, **(extra or {}),
                   "metadata": {"type": "entry", "createdAt": t, "updatedAt": t}}
         self.fb.update(self.app, {f"analyses/{rid}": record,
                                   f"transcripts/{rid}": {"snippets": snips, "metadata": {"type": "entry", "createdAt": t, "updatedAt": t}}})
@@ -86,7 +87,7 @@ class SlantRecords:
         return rid, record
 
     def update_reanalysis(self, rid, result, truncated, model, extra=None):
-        """Same fields the app's Re-analyze writes; flags (Disagree? notes) and everything else are preserved."""
+        """Same fields the app's Re-analyze writes; every other field of the record is preserved."""
         self.fb.update(f"{self.app}/analyses/{rid}", {"result": result, "truncated": truncated, "model": model,
                                                       "metadata/updatedAt": self.clock(), **(extra or {})})
         self.invalidate()

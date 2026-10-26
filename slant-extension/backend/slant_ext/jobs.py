@@ -76,6 +76,7 @@ class JobManager:
         self.store, self.records, self.providers, self.spec, self.limits, self.clock = store, records, providers, spec, limits, clock
         self.sim_delay = sim_delay
         self.feed = None                  # FeedWriter, set by the server; None in tests that don't need it
+        self.account_exempt = None        # uid -> True for the Slant team (owner, Editors); set by the server
         self.pool = ThreadPoolExecutor(max_workers=int(limits["workers"]), thread_name_prefix="slant-job")
         self._stop = threading.Event()
         self._watchdog = None
@@ -113,7 +114,7 @@ class JobManager:
             self._fail(row["id"], "timeout", "This analysis took too long and was stopped. Try again.", True)
 
     # ---- submission -------------------------------------------------------------------------------------------
-    def submit(self, cred, url, idem_key, mode="auto", simulate=None):
+    def submit(self, cred, url, idem_key, mode="auto", simulate=None, target=None):
         """Returns (job_row, created)."""
         parsed = ytid.parse(url)
         if not parsed:
@@ -128,6 +129,8 @@ class JobManager:
         prior = self.store.job_by_idem(cred["id"], idem_key)
         if prior:
             return self._same_request(prior, vid, mode)
+        acct = cred.get("uid")
+        limited_acct = acct if acct and not (self.account_exempt and self.account_exempt(acct)) else None  # outside the lock
         cached_rid, cached_rec = (None, None)
         if mode == "auto" and not simulate:
             cached_rid, cached_rec = self.records.latest_for(vid)     # Firebase read happens outside the lock
@@ -139,6 +142,8 @@ class JobManager:
             row = dict(id="job_" + secrets.token_urlsafe(12), credential_id=cred["id"], idem_key=idem_key, video_id=vid,
                        canonical_url=parsed["canonicalUrl"], is_short=1 if parsed["isShort"] else 0, mode=mode,
                        spec_hash=self.spec["HASH"], state="queued", stage="queued", created_at=now, updated_at=now)
+            if target and mode == "fresh":
+                row.update(target=target)
             if simulate:
                 row.update(simulate=simulate)
                 self.store.insert_job(row)
@@ -155,8 +160,8 @@ class JobManager:
                 row.update(follows=leader["id"], title=leader.get("title"), author=leader.get("author"))
                 self.store.insert_job(row)
                 return self.store.job(row["id"]), True
-            self._enforce_limits(cred)
-            row.update(paid=1)
+            self._enforce_limits(cred, limited_acct)
+            row.update(paid=1, public=1 if limited_acct else 0)
             self.store.insert_job(row)
         self._enqueue(row["id"])
         return self.store.job(row["id"]), True
@@ -167,16 +172,21 @@ class JobManager:
             raise ApiError(409, "idempotency_conflict", "This request ID was already used for a different request.")
         return prior, False
 
-    def _enforce_limits(self, cred):
+    def _enforce_limits(self, cred, limited_acct=None):
         L, day_ago = self.limits, self.clock() - 86_400_000
         if self.store.active_paid(cred["id"]) >= L["per_browser_active"]:
             raise ApiError(429, "busy", "This browser already has an analysis running. Wait for it to finish.")
+        if limited_acct and self.store.active_paid_uid(limited_acct) >= L["account_active"]:
+            raise ApiError(429, "busy", "Another of your browsers has an analysis running. Wait for it to finish.")
+        if limited_acct and self.store.paid_since_uid(day_ago, limited_acct) >= L["account_daily"]:
+            raise ApiError(429, "daily_limit", f"Your Mana account has used its {L['account_daily']} new analyses for the last 24 hours. Saved analyses still open.")
         if self.store.active_paid() >= L["queue_max"]:
             raise ApiError(429, "busy", "Slant is busy with other analyses right now. Try again in a minute.")
-        if self.store.paid_since(day_ago, cred["id"]) >= L["per_browser_daily"]:
+        if not cred["id"].startswith("web_") and self.store.paid_since(day_ago, cred["id"]) >= L["per_browser_daily"]:
             raise ApiError(429, "daily_limit", f"This browser has used its {L['per_browser_daily']} new analyses for the last 24 hours. Saved analyses still open.")
-        if self.store.paid_since(day_ago) >= L["global_daily"]:
-            raise ApiError(429, "daily_limit", f"Slant's extension backend has reached its {L['global_daily']} new analyses for the last 24 hours. Saved analyses still open.")
+        # The overall daily cap counts and limits only public accounts; the Slant team (owner, Editors) is exempt.
+        if limited_acct and self.store.paid_since(day_ago, public_only=True) >= L["global_daily"]:
+            raise ApiError(429, "daily_limit", f"Slant has reached its {L['global_daily']} new analyses for public accounts in the last 24 hours. Saved analyses still open.")
 
     # ---- execution --------------------------------------------------------------------------------------------
     def _enqueue(self, job_id):
@@ -202,7 +212,7 @@ class JobManager:
         """Add a finished job's video to the browser owner's Slant feed, once per job. Runs in the background."""
         if not self.feed:
             return
-        row = self.store.one("SELECT j.id, j.state, j.record_id, j.simulate, c.uid FROM jobs j JOIN credentials c ON c.id=j.credential_id "
+        row = self.store.one("SELECT j.id, j.state, j.record_id, j.simulate, j.credential_id, c.uid FROM jobs j JOIN credentials c ON c.id=j.credential_id "
                              "WHERE j.id=?", (job_id,))
         if not row or row["state"] != "done" or not row["record_id"] or row["simulate"] or not row["uid"]:
             return
@@ -214,7 +224,8 @@ class JobManager:
                 rec = self.records.get(row["record_id"])
                 if isinstance(rec, dict):
                     from .records import unpack_result
-                    self.feed.record(row["uid"], row["record_id"], {**rec, "result": unpack_result(rec.get("result"))})
+                    self.feed.record(row["uid"], row["record_id"], {**rec, "result": unpack_result(rec.get("result"))},
+                                     via="app" if row["credential_id"].startswith("web_") else "chrome-extension")
             except Exception:
                 traceback.print_exc()
                 self.store.run("UPDATE jobs SET fed=0 WHERE id=?", (job_id,))
@@ -247,8 +258,12 @@ class JobManager:
             return self._simulate(ctx, job)
         vid, L = job["video_id"], self.limits
 
-        if job["mode"] == "fresh":                 # like the app's Re-analyze: reuse the saved transcript, keep feedback
+        if job["mode"] == "fresh":                 # like the app's Re-analyze: reuse the saved transcript
             rid, rec = self.records.latest_for(vid)
+            if job.get("target"):                  # the website re-analyzes the exact report it shows
+                trec = self.records.get(job["target"])
+                if isinstance(trec, dict) and trec.get("videoId") == vid and trec.get("result"):
+                    rid, rec = job["target"], trec
             snips = normalize_snips(self.records.transcript(rid)) if rid else []
             if rid and snips:
                 meta = {"title": rec.get("title"), "author": rec.get("author"), "source": rec.get("source")}
@@ -331,7 +346,8 @@ class JobManager:
         fields = {"videoId": vid, "url": job["canonical_url"], "title": meta.get("title") or "", "author": meta.get("author") or "",
                   "language": meta.get("language") or "", "source": source, "model": self.spec["MODEL"], "segments": len(snips),
                   "duration": (last["t"] + last["d"]) if last else 0, "truncated": truncated, "result": result}
-        rid, record = self.records.save_new(fields, snips, {"analysisVersion": self.spec["HASH"], "via": "chrome-extension"})
+        via = "app" if job["credential_id"].startswith("web_") else "chrome-extension"
+        rid, record = self.records.save_new(fields, snips, {"analysisVersion": self.spec["HASH"], "via": via})
         ctx.done(rid, self.records.payload(rid, record, snips))
 
     def _simulate(self, ctx, job):

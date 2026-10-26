@@ -1,4 +1,68 @@
-# Test report (October 24, 2026)
+# Test report (October 25, 2026)
+
+## 1.6.0: team bear.js, pixel speech bubble, new card (October 25, 2026)
+
+Changes: `lib/bear.js` (the team's module) is now the only source of the bear's drawing, inlined into `content.js` by `scripts/build_bear.py`; the bubble under the bear is the team's pixel speech bubble with an up-pointing arrow (one centre line kept); the card is the team's design (lean number + pill + AllSides colour scale with band names, five signals as "x / 10" bars) plus equal Close / Full report buttons; the analyzing bubble keeps the live step and seconds at 18 px; the card's scrollbar is hidden. Not taken from the team's 1.5.2 zip: the side panel (`sidepanel.*`), its `background.js` and its manifest `side_panel` / `sidePanel` permission. The bear's drawing is pixel-identical to 1.4.1.
+
+- `node tests/test_extension.mjs`: 8/8, including the new check that `content.js` holds the current `lib/bear.js`.
+- `tests/browser/run_card_tests.py` (real Chromium on YouTube, free: saved videos and simulated jobs): run 1 9/10 (C8 timed out), run 2 8/10 (C9 timed out; C10 failed after it), run 3 **10/10**. Each scenario passed in at least two of the three runs. The timeouts were in setup and worker-restart timing, which 1.6 doesn't change.
+  - C2: bear, bubble, arrow and card centres identical (1179.0 px); buttons 162/162 px; bubble fonts 22/18 px; card scrollbar 0 px; card inside the window.
+  - C3: wheel scrolls the card body; Escape, Close and a second tap hide the card.
+  - C5 (simulated run): bubble showed four real steps with seconds at 18 px; the simulated result hides Full report and shows one full-width Close.
+  - C10 (1100×620): card bottom 604 px, footer buttons visible, body scrolls.
+- Screenshots: `tests/browser/shots/card/` (C2-card, C5-analyzing, C6-fail-rate, C10-short-window).
+
+
+
+## 1.4.1: Your feed on the setup page (October 24, 2026)
+
+Added a Your feed section to the connected setup page, linking to `…/apps/slant?slant=feed` (built from the Slant address the backend returns at pairing; hidden if that address is missing). Free browser suite (`tests/browser/run_card_tests.py`): 10/10 passing; the connected-setup screenshot shows the new section between This browser and How to use it. `tests/test_extension.mjs` passing. No credits spent.
+## Slant made public, view only (October 24, 2026)
+
+Slant is now readable by anyone (logged-out visitors get a guest session); write access stays with the owner and the three Editors. Checked live with two guest sessions: saved analyses, transcripts and the app open; editing, deleting or adding to Slant is refused; each guest reads and writes only its own feed and can't see the owner's or the other guest's; other apps stay private; the backend refuses a guest's analysis request (403). In a logged-out browser the full report opens (the link the extension uses), Re-analyze is hidden, pasting a new video shows the view-only message, and Your feed opens empty. Rollback: remove `public_read` from apps/slant (nothing else changes).
+
+## Slant website analyses moved to the backend (October 24, 2026)
+
+Slant's page no longer holds AI access: new analyses and Re-analyze go to the backend (team only), and the page's OpenAI and Gemini connections and caption-service link were removed. Backend: 46 tests passing (3 new: website analyses are team-only and per person, records say `via: app`, the website key isn't listed as a browser and isn't capped per day, Re-analyze updates the exact report shown). Live: the old OpenAI and Gemini connections now answer "not found"; the owner's website request for a saved video returned it with no AI spend; a guest was refused; reopening Slant did not recreate the old connections. Not yet run: one paid website analysis of a new video.
+
+## Team exempt from the overall daily cap (October 24, 2026)
+
+At Phil's request, the 200-per-day overall cap now applies only to public accounts: team analyses (owner and Editors) neither count toward it nor get blocked by it. Running-at-once and video-length limits are unchanged. Backend: 43 tests passing; the new one checks that team analyses don't use up the public allowance and that the team still analyzes after public accounts hit the cap.
+
+## Disagree? removed (October 24, 2026)
+
+At Phil's request the Disagree? notes feature was removed from Slant: its button, form and owner note list, the 'How Slant works' mention, and the open per-person write permission on every analysis. No notes had been submitted. The extension backend no longer creates that permission on new analyses, and its prompt extractor no longer expects it. Backend tests: 42 passing (the record-shape test now checks new records carry no notes node; the re-analysis test checks other fields are kept).
+
+## Public pairing: any Mana account can pair (backend 1.1.0, October 24, 2026)
+
+No credits were spent. The extension itself is unchanged (1.4.0).
+
+**Automated: backend 42 passing** (33 earlier + 9 new):
+
+- **Token verification with real RS256 signatures** (a locally generated key standing in for Google's): valid tokens pass; a different key, an unknown key ID, the wrong audience or issuer, an expired token, a bad subject, a future sign-in time, a tampered signature and an HS256 token are all refused. Guest sessions are recognised.
+- **Two ordinary accounts:** each sees only its own browsers; neither can remove the other's (404) or reach any team route (403); removing your own browser disconnects only that browser.
+- **Sign-in required:** no token, a forged token or a bare user-id header gets 401; a guest session gets 403; a token that disagrees with forward-auth's user gets 403.
+- **Quotas can't be reset by re-pairing:** after 2 analyses (test limit), removing the browser and pairing a new one still hits the account's daily limit; saved analyses still open; another account keeps its own allowance.
+- **Browser cap:** a 3rd code is refused at the cap, and a code created earlier can't be redeemed past it.
+- **Codes don't evict across accounts;** one account keeps only its 2 newest codes.
+- **One running analysis per account** across its browsers.
+- **The team is exempt** from per-account caps, and the team view shows who paired each browser (verified email, public vs team) without exposing user ids.
+
+**Live, through the public Mana link:**
+
+| Check | Result |
+|---|---|
+| Owner's real Mana sign-in, via Mana's proxy and ingress | 200, recognised as team (with or without forward-auth's header) |
+| Same token with a tampered signature | 401 |
+| No token | 401 |
+| Guest session: page code, docs, download grant, reconnect link | Readable |
+| Guest session: writing to the page | Refused (401) |
+| Guest session: status, pairing, team routes | 403, 403, 403 |
+| Guest session: the Slant app | Not readable (see Limitations) |
+| Logged-out browser opening the page | Install, reconnect and docs shown; pairing asks to sign in |
+| Team view in the owner's browser | All browsers, usage and prompt status; no errors |
+
+**Not tested live:** a second real, non-anonymous Mana account end to end (covered by the automated tests above). The first time a teammate or friend pairs, check that their browser appears under Your browsers for them and as a Public account in the team view.
 
 ## 1.4.0: the bear is the whole interface (October 24, 2026)
 

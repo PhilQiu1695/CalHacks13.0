@@ -47,13 +47,13 @@ Details: [docs/DESIGN.md](docs/DESIGN.md).
 | [`docs/DESIGN.md`](docs/DESIGN.md) | Current design doc |
 | [`docs/design-doc-v1.pdf`](docs/design-doc-v1.pdf) | Original pre-Mana design doc |
 
-`slant/` is a source export from Mana. It uses Mana-provided APIs and is meant to run inside Mana, not standalone. See [`slant/README.md`](slant/README.md).
+`slant/` is a source export from Mana (live version as of October 25, 2026; extension 1.6.0). It uses Mana-provided APIs and is meant to run inside Mana, not standalone. See [`slant/README.md`](slant/README.md).
 
 ## Chrome extension
 
-[`slant-extension/extension/`](slant-extension/extension/) loads unpacked in Chrome 116+ (`chrome://extensions` → Developer mode → Load unpacked). A pixel bear sits on every YouTube video and Short: tap it to analyze, tap again for a card with the political lean on a left-to-right bar, how slanted the video is (0–10, in words), the five signals, and a link to the full report in Slant. Analyses run on the extension backend ([`slant-extension/backend/`](slant-extension/backend/)) in the Mana sandbox, with the same prompt, schema and quote checks as the app, and are saved to the same Slant history.
+[`slant-extension/extension/`](slant-extension/extension/) loads unpacked in Chrome 116+ (`chrome://extensions` → Developer mode → Load unpacked). A pixel bear sits on every YouTube video and Short: tap it to analyze, a pixel speech bubble under it shows progress, and tapping again opens a card with the political lean (number, band and AllSides colour scale), the five signals as “x / 10” bars, and equal Close / Full report buttons. Analyses run on the extension backend ([`slant-extension/backend/`](slant-extension/backend/)) in the Mana sandbox, with the same prompt, schema and quote checks as the app, and are saved to the same Slant history.
 
-How it's built: [`IMPLEMENTATION.md`](slant-extension/docs/IMPLEMENTATION.md). Tests: backend (33), extension logic (7) and a real-browser suite (10 scenarios); see [`TEST-REPORT.md`](slant-extension/docs/TEST-REPORT.md). The backend's secrets and database (`slant-extension/backend/data/`) are not in this repository.
+How it's built: [`IMPLEMENTATION.md`](slant-extension/docs/IMPLEMENTATION.md). Tests: backend (46), extension logic (8) and a real-browser card suite; see [`TEST-REPORT.md`](slant-extension/docs/TEST-REPORT.md). The backend's secrets and database (`slant-extension/backend/data/`) are not in this repository.
 
 ## Team
 

@@ -7,7 +7,7 @@ import secrets
 ROOT = os.environ.get("SLANT_EXT_ROOT", "/workspace/slant-extension")
 DATA_DIR = os.environ.get("SLANT_EXT_DATA", os.path.join(ROOT, "backend", "data"))
 SPEC_PATH = os.environ.get("SLANT_EXT_SPEC", os.path.join(ROOT, "spec", "slant_spec.json"))
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 SERVICE = "slant-ext"
 
 # Conservative demo limits. Override any of them in data/limits.json (owner-side file).
@@ -16,7 +16,7 @@ DEFAULT_LIMITS = {
     "queue_max": 6,                  # queued + running paid jobs (whole backend)
     "per_browser_active": 1,         # paid jobs one paired browser may have queued/running
     "per_browser_daily": 20,         # new (non-cached) analyses per paired browser per rolling 24 h
-    "global_daily": 40,              # new analyses for the whole backend per rolling 24 h
+    "global_daily": 40,              # new analyses by public (non-team) accounts per rolling 24 h; the team is exempt
     "max_minutes_captions": 90,      # longest video analyzed from captions
     "max_minutes_ai": 20,            # longest video sent to paid AI transcription
     "ai_tokens_per_second": 104,     # Gemini input tokens per second of video at low media resolution (measured: 16,663 for 161 s)
@@ -26,8 +26,18 @@ DEFAULT_LIMITS = {
     "pair_attempts_per_10min": 10,   # POST /v1/pair per client IP
     "body_max_bytes": 4096,
     "pairing_code_ttl_seconds": 600,
-    "max_active_pairing_codes": 5,
+    "max_active_pairing_codes": 5,   # live codes per Slant team member (and among sandbox-admin codes)
+    # Ordinary Mana accounts (not the owner or an Editor of Slant for Chrome). Counted across all of the account's
+    # browsers, revoked ones included, so pairing a new browser never resets an allowance.
+    "account_daily": 20,             # new analyses per account per rolling 24 h
+    "account_active": 1,             # paid jobs one account may have queued/running
+    "account_max_browsers": 3,       # live paired browsers per account
+    "account_active_codes": 2,       # live pairing codes per account
+    "account_codes_per_hour": 10,    # pairing codes an account may create per hour
+    "max_outstanding_codes": 200,    # live pairing codes across everyone
 }
+
+FIREBASE_PROJECT = os.environ.get("SLANT_EXT_FIREBASE_PROJECT", "fully-generative")
 
 SPEC_HASH_KEYS = ("MODEL", "GEM_MODEL", "MAX_CHARS", "SYSTEM", "SCHEMA", "GEMINI_REQUEST", "SRC_LABEL", "DIMS")
 

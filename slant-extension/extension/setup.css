@@ -34,6 +34,7 @@ textarea.field { min-height: 76px; resize: vertical; font-family: ui-monospace, 
 .btn { display: inline-flex; align-items: center; justify-content: center; height: 42px; padding: 0 20px; border-radius: 999px; border: 1px solid var(--line);
        background: transparent; font-weight: 600; font-size: 14px; cursor: pointer; white-space: nowrap; }
 .btn.primary { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+a.btn { text-decoration: none; gap: 6px; }
 .btn[disabled] { opacity: .5; cursor: default; }
 .link { background: none; border: 0; padding: 0; color: var(--soft); font-size: 13px; cursor: pointer; text-decoration: underline; text-underline-offset: 3px; }
 .note { font-size: 13px; color: var(--faint); margin-top: 14px; }

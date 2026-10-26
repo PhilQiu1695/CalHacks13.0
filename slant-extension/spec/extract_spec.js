@@ -15,7 +15,7 @@ const head = code.slice(0, code.indexOf('function palette'));
 const captured = [];
 let nextResponse = null;
 const fetchStub = async (url, opts) => { captured.push({ url, body: JSON.parse(opts.body) }); return nextResponse; };
-const names = ['MODEL', 'GEM_MODEL', 'MAX_CHARS', 'DIMS', 'SRC_LABEL', 'LEAN_BANDS', 'FLAG_PERMS', 'SLANT_EXPLAINER', 'SYSTEM', 'SCHEMA',
+const names = ['MODEL', 'GEM_MODEL', 'MAX_CHARS', 'DIMS', 'SRC_LABEL', 'LEAN_BANDS', 'SLANT_EXPLAINER', 'SYSTEM', 'SCHEMA',
   'fmtT', 'locate', 'buildIndex', 'norm', 'parseVideoId', 'leanScore', 'leanBand', 'fmtLean', 'biasWord', 'geminiTranscript', 'runAnalysis',
   'unpackResult', 'packResult'];
 const M = new Function('fetch', head + '\nreturn {' + names.join(',') + '};')(fetchStub);
@@ -55,7 +55,7 @@ const ok = (obj) => ({ ok: true, status: 200, json: async () => obj, text: async
   const spec = {
     source: 'apps/slant/app/code (live), extracted ' + new Date().toISOString(),
     MODEL: M.MODEL, GEM_MODEL: M.GEM_MODEL, MAX_CHARS: M.MAX_CHARS, DIMS: M.DIMS, SRC_LABEL: M.SRC_LABEL, LEAN_BANDS: M.LEAN_BANDS,
-    FLAG_PERMS: M.FLAG_PERMS, SLANT_EXPLAINER: M.SLANT_EXPLAINER, SYSTEM: M.SYSTEM, SCHEMA: M.SCHEMA,
+    SLANT_EXPLAINER: M.SLANT_EXPLAINER, SYSTEM: M.SYSTEM, SCHEMA: M.SCHEMA,
     GEMINI_REQUEST: gemReq.body, GEMINI_PATH: gemReq.url.replace('https://ROUTER', ''),
     ANALYSIS_TRUNCATION_NOTE: '\nNote: only the first part of the transcript fits; say so in caveats.',
   };

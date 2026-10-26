@@ -90,12 +90,23 @@ test('manifest keeps permissions minimal', () => {
   for (const f of [m.background.service_worker, m.options_ui.page, ...Object.values(m.icons)]) assert.ok(fs.existsSync(path.join(EXT, f)), f);
 });
 
-test('the card states every score in words and links to the report', () => {
+test('the card states the lean in words, the five signals, and links to the report', () => {
   const src = fs.readFileSync(path.join(EXT, 'content.js'), 'utf8');
-  for (const s of ['Full report ↗', '0 · Fair and balanced', '10 · Extreme', '← Left', 'Right →', 'out of 10', 'AllSides', 'Close'])
+  for (const s of ['Full report ↗', 'Political lean', 'AllSides scale', 'Not political', 'Other signals', "' / 10'", 'out of 10', 'Close',
+                   'Tap me to analyze', 'Tap me for results', 'Tap me again to hide', 'scrollbar-width:none'])
     assert.ok(src.includes(s), 'card text: ' + s);
   assert.ok(/target: '_blank', rel: 'noopener noreferrer'/.test(src), 'report link opens safely in a new tab');
   assert.ok(src.includes("/^https:\\/\\/www\\.mana\\.space\\//"), 'only Slant website links');
+});
+
+test('the bear in content.js is the current lib/bear.js (run scripts/build_bear.py after editing it)', () => {
+  const src = fs.readFileSync(path.join(EXT, 'content.js'), 'utf8');
+  const bear = fs.readFileSync(path.join(EXT, 'lib/bear.js'), 'utf8');
+  const start = src.indexOf('  const Bear = (() => {\n'), end = src.indexOf('    return { compose, draw, scoresFromResult, aggregate, W, H };');
+  assert.ok(start > 0 && end > start, 'generated bear block present');
+  const inlined = src.slice(start + '  const Bear = (() => {\n'.length, end).split('\n').map((l) => l.replace(/^    /, '')).join('\n').trimEnd();
+  assert.equal(inlined, bear.replace(/^export /gm, '').trimEnd(), 'content.js holds a stale copy of lib/bear.js');
+  assert.ok(!/function compose\(/.test(src.slice(0, start)) && !/function compose\(/.test(src.slice(end)), 'no second copy of the drawing code');
 });
 
 test('no HTML injection sinks, dynamic code or remote scripts', () => {
